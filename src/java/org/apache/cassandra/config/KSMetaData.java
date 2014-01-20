@@ -43,7 +43,19 @@ public final class KSMetaData
     private final Map<String, CFMetaData> cfMetaData;
     public final boolean durableWrites;
 
+    public final UTMetaData userTypes;
+
     KSMetaData(String name, Class<? extends AbstractReplicationStrategy> strategyClass, Map<String, String> strategyOptions, boolean durableWrites, Iterable<CFMetaData> cfDefs)
+    {
+        this(name, strategyClass, strategyOptions, durableWrites, cfDefs, new UTMetaData());
+    }
+
+    KSMetaData(String name,
+               Class<? extends AbstractReplicationStrategy> strategyClass,
+               Map<String, String> strategyOptions,
+               boolean durableWrites,
+               Iterable<CFMetaData> cfDefs,
+               UTMetaData userTypes)
     {
         this.name = name;
         this.strategyClass = strategyClass == null ? NetworkTopologyStrategy.class : strategyClass;
@@ -53,6 +65,7 @@ public final class KSMetaData
             cfmap.put(cfm.cfName, cfm);
         this.cfMetaData = Collections.unmodifiableMap(cfmap);
         this.durableWrites = durableWrites;
+        this.userTypes = userTypes;
     }
 
     // For new user created keyspaces (through CQL)
@@ -67,12 +80,12 @@ public final class KSMetaData
 
     public static KSMetaData newKeyspace(String name, Class<? extends AbstractReplicationStrategy> strategyClass, Map<String, String> options, boolean durablesWrites, Iterable<CFMetaData> cfDefs)
     {
-        return new KSMetaData(name, strategyClass, options, durablesWrites, cfDefs);
+        return new KSMetaData(name, strategyClass, options, durablesWrites, cfDefs, new UTMetaData());
     }
 
     public static KSMetaData cloneWith(KSMetaData ksm, Iterable<CFMetaData> cfDefs)
     {
-        return new KSMetaData(ksm.name, ksm.strategyClass, ksm.strategyOptions, ksm.durableWrites, cfDefs);
+        return new KSMetaData(ksm.name, ksm.strategyClass, ksm.strategyOptions, ksm.durableWrites, cfDefs, ksm.userTypes);
     }
 
     public static KSMetaData systemKeyspace()
@@ -127,7 +140,8 @@ public final class KSMetaData
                 && ObjectUtils.equals(other.strategyClass, strategyClass)
                 && ObjectUtils.equals(other.strategyOptions, strategyOptions)
                 && other.cfMetaData.equals(cfMetaData)
-                && other.durableWrites == durableWrites;
+                && other.durableWrites == durableWrites
+                && ObjectUtils.equals(other.userTypes, userTypes);
     }
 
     public Map<String, CFMetaData> cfMetaData()
@@ -194,7 +208,7 @@ public final class KSMetaData
         return ksdef;
     }
 
-    public RowMutation toSchemaUpdate(KSMetaData newState, long modificationTimestamp)
+    public Mutation toSchemaUpdate(KSMetaData newState, long modificationTimestamp)
     {
         return newState.toSchema(modificationTimestamp);
     }
@@ -215,7 +229,6 @@ public final class KSMetaData
         return this;
     }
 
-
     public KSMetaData reloadAttributes()
     {
         Row ksDefRow = SystemKeyspace.readSchemaRow(name);
@@ -223,33 +236,37 @@ public final class KSMetaData
         if (ksDefRow.cf == null)
             throw new RuntimeException(String.format("%s not found in the schema definitions keyspaceName (%s).", name, SystemKeyspace.SCHEMA_KEYSPACES_CF));
 
-        return fromSchema(ksDefRow, Collections.<CFMetaData>emptyList());
+        return fromSchema(ksDefRow, Collections.<CFMetaData>emptyList(), userTypes);
     }
 
-    public RowMutation dropFromSchema(long timestamp)
+    public Mutation dropFromSchema(long timestamp)
     {
-        RowMutation rm = new RowMutation(Keyspace.SYSTEM_KS, SystemKeyspace.getSchemaKSKey(name));
-        rm.delete(SystemKeyspace.SCHEMA_KEYSPACES_CF, timestamp);
-        rm.delete(SystemKeyspace.SCHEMA_COLUMNFAMILIES_CF, timestamp);
-        rm.delete(SystemKeyspace.SCHEMA_COLUMNS_CF, timestamp);
-        rm.delete(SystemKeyspace.SCHEMA_TRIGGERS_CF, timestamp);
+        Mutation mutation = new Mutation(Keyspace.SYSTEM_KS, SystemKeyspace.getSchemaKSKey(name));
 
-        return rm;
+        mutation.delete(SystemKeyspace.SCHEMA_KEYSPACES_CF, timestamp);
+        mutation.delete(SystemKeyspace.SCHEMA_COLUMNFAMILIES_CF, timestamp);
+        mutation.delete(SystemKeyspace.SCHEMA_COLUMNS_CF, timestamp);
+        mutation.delete(SystemKeyspace.SCHEMA_TRIGGERS_CF, timestamp);
+        mutation.delete(SystemKeyspace.SCHEMA_USER_TYPES_CF, timestamp);
+
+        return mutation;
     }
 
-    public RowMutation toSchema(long timestamp)
+    public Mutation toSchema(long timestamp)
     {
-        RowMutation rm = new RowMutation(Keyspace.SYSTEM_KS, SystemKeyspace.getSchemaKSKey(name));
-        ColumnFamily cf = rm.addOrGet(CFMetaData.SchemaKeyspacesCf);
+        Mutation mutation = new Mutation(Keyspace.SYSTEM_KS, SystemKeyspace.getSchemaKSKey(name));
+        ColumnFamily cf = mutation.addOrGet(CFMetaData.SchemaKeyspacesCf);
+        CFRowAdder adder = new CFRowAdder(cf, CFMetaData.SchemaKeyspacesCf.comparator.builder().build(), timestamp);
 
-        cf.addColumn(Column.create(durableWrites, timestamp, "durable_writes"));
-        cf.addColumn(Column.create(strategyClass.getName(), timestamp, "strategy_class"));
-        cf.addColumn(Column.create(json(strategyOptions), timestamp, "strategy_options"));
+        adder.add("durable_writes", durableWrites);
+        adder.add("strategy_class", strategyClass.getName());
+        adder.add("strategy_options", json(strategyOptions));
 
         for (CFMetaData cfm : cfMetaData.values())
-            cfm.toSchema(rm, timestamp);
+            cfm.toSchema(mutation, timestamp);
 
-        return rm;
+        userTypes.toSchema(mutation, timestamp);
+        return mutation;
     }
 
     /**
@@ -259,7 +276,7 @@ public final class KSMetaData
      *
      * @return deserialized keyspace without cf_defs
      */
-    public static KSMetaData fromSchema(Row row, Iterable<CFMetaData> cfms)
+    public static KSMetaData fromSchema(Row row, Iterable<CFMetaData> cfms, UTMetaData userTypes)
     {
         UntypedResultSet.Row result = QueryProcessor.resultify("SELECT * FROM system.schema_keyspaces", row).one();
         try
@@ -268,7 +285,8 @@ public final class KSMetaData
                                   AbstractReplicationStrategy.getClass(result.getString("strategy_class")),
                                   fromJsonMap(result.getString("strategy_options")),
                                   result.getBoolean("durable_writes"),
-                                  cfms);
+                                  cfms,
+                                  userTypes);
         }
         catch (ConfigurationException e)
         {
@@ -284,10 +302,11 @@ public final class KSMetaData
      *
      * @return deserialized keyspace with cf_defs
      */
-    public static KSMetaData fromSchema(Row serializedKs, Row serializedCFs)
+    public static KSMetaData fromSchema(Row serializedKs, Row serializedCFs, Row serializedUserTypes)
     {
         Map<String, CFMetaData> cfs = deserializeColumnFamilies(serializedCFs);
-        return fromSchema(serializedKs, cfs.values());
+        UTMetaData userTypes = new UTMetaData(UTMetaData.fromSchema(serializedUserTypes));
+        return fromSchema(serializedKs, cfs.values(), userTypes);
     }
 
     /**
@@ -308,17 +327,6 @@ public final class KSMetaData
             CFMetaData cfm = CFMetaData.fromSchema(result);
             cfms.put(cfm.cfName, cfm);
         }
-
-        for (CFMetaData cfm : cfms.values())
-        {
-            Row columnRow = SystemKeyspace.readSchemaRow(SystemKeyspace.SCHEMA_COLUMNS_CF, cfm.ksName, cfm.cfName);
-            // This may replace some existing definition coming from the old key, column and
-            // value aliases. But that's what we want (see CFMetaData.fromSchemaNoColumnsNoTriggers).
-            for (ColumnDefinition cd : ColumnDefinition.fromSchema(columnRow, cfm))
-                cfm.addOrReplaceColumnDefinition(cd);
-            cfm.rebuild();
-        }
-
         return cfms;
     }
 }

@@ -29,7 +29,10 @@ import java.util.TreeSet;
 
 import com.google.common.base.Joiner;
 
+import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.db.ColumnFamily;
+import org.apache.cassandra.db.composites.CellName;
+import org.apache.cassandra.db.composites.Composite;
 import org.apache.cassandra.db.marshal.CollectionType;
 import org.apache.cassandra.db.marshal.MapType;
 import org.apache.cassandra.db.marshal.SetType;
@@ -59,9 +62,9 @@ public abstract class Sets
             this.elements = elements;
         }
 
-        public Term prepare(ColumnSpecification receiver) throws InvalidRequestException
+        public Term prepare(String keyspace, ColumnSpecification receiver) throws InvalidRequestException
         {
-            validateAssignableTo(receiver);
+            validateAssignableTo(keyspace, receiver);
 
             // We've parsed empty maps as a set literal to break the ambiguity so
             // handle that case now
@@ -74,7 +77,7 @@ public abstract class Sets
             boolean allTerminal = true;
             for (Term.Raw rt : elements)
             {
-                Term t = rt.prepare(valueSpec);
+                Term t = rt.prepare(keyspace, valueSpec);
 
                 if (t.containsBindMarker())
                     throw new InvalidRequestException(String.format("Invalid set literal for %s: bind variables are not supported inside collection literals", receiver));
@@ -88,7 +91,7 @@ public abstract class Sets
             return allTerminal ? value.bind(Collections.<ByteBuffer>emptyList()) : value;
         }
 
-        private void validateAssignableTo(ColumnSpecification receiver) throws InvalidRequestException
+        private void validateAssignableTo(String keyspace, ColumnSpecification receiver) throws InvalidRequestException
         {
             if (!(receiver.type instanceof SetType))
             {
@@ -103,16 +106,16 @@ public abstract class Sets
             ColumnSpecification valueSpec = Sets.valueSpecOf(receiver);
             for (Term.Raw rt : elements)
             {
-                if (!rt.isAssignableTo(valueSpec))
+                if (!rt.isAssignableTo(keyspace, valueSpec))
                     throw new InvalidRequestException(String.format("Invalid set literal for %s: value %s is not of type %s", receiver, rt, valueSpec.type.asCQL3Type()));
             }
         }
 
-        public boolean isAssignableTo(ColumnSpecification receiver)
+        public boolean isAssignableTo(String keyspace, ColumnSpecification receiver)
         {
             try
             {
-                validateAssignableTo(receiver);
+                validateAssignableTo(keyspace, receiver);
                 return true;
             }
             catch (InvalidRequestException e)
@@ -222,33 +225,33 @@ public abstract class Sets
 
     public static class Setter extends Operation
     {
-        public Setter(ColumnIdentifier column, Term t)
+        public Setter(ColumnDefinition column, Term t)
         {
             super(column, t);
         }
 
-        public void execute(ByteBuffer rowKey, ColumnFamily cf, ColumnNameBuilder prefix, UpdateParameters params) throws InvalidRequestException
+        public void execute(ByteBuffer rowKey, ColumnFamily cf, Composite prefix, UpdateParameters params) throws InvalidRequestException
         {
             // delete + add
-            ColumnNameBuilder column = prefix.add(columnName);
-            cf.addAtom(params.makeTombstoneForOverwrite(column.build(), column.buildAsEndOfRange()));
-            Adder.doAdd(t, cf, column, params);
+            CellName name = cf.getComparator().create(prefix, column.name);
+            cf.addAtom(params.makeTombstoneForOverwrite(name.slice()));
+            Adder.doAdd(t, cf, prefix, column.name, params);
         }
     }
 
     public static class Adder extends Operation
     {
-        public Adder(ColumnIdentifier column, Term t)
+        public Adder(ColumnDefinition column, Term t)
         {
             super(column, t);
         }
 
-        public void execute(ByteBuffer rowKey, ColumnFamily cf, ColumnNameBuilder prefix, UpdateParameters params) throws InvalidRequestException
+        public void execute(ByteBuffer rowKey, ColumnFamily cf, Composite prefix, UpdateParameters params) throws InvalidRequestException
         {
-            doAdd(t, cf, prefix.add(columnName), params);
+            doAdd(t, cf, prefix, column.name, params);
         }
 
-        static void doAdd(Term t, ColumnFamily cf, ColumnNameBuilder columnName, UpdateParameters params) throws InvalidRequestException
+        static void doAdd(Term t, ColumnFamily cf, Composite prefix, ColumnIdentifier columnName, UpdateParameters params) throws InvalidRequestException
         {
             Term.Terminal value = t.bind(params.variables);
             if (value == null)
@@ -259,7 +262,7 @@ public abstract class Sets
             Set<ByteBuffer> toAdd = ((Sets.Value)value).elements;
             for (ByteBuffer bb : toAdd)
             {
-                ByteBuffer cellName = columnName.copy().add(bb).build();
+                CellName cellName = cf.getComparator().create(prefix, columnName, bb);
                 cf.addColumn(params.makeColumn(cellName, ByteBufferUtil.EMPTY_BYTE_BUFFER));
             }
         }
@@ -267,12 +270,12 @@ public abstract class Sets
 
     public static class Discarder extends Operation
     {
-        public Discarder(ColumnIdentifier column, Term t)
+        public Discarder(ColumnDefinition column, Term t)
         {
             super(column, t);
         }
 
-        public void execute(ByteBuffer rowKey, ColumnFamily cf, ColumnNameBuilder prefix, UpdateParameters params) throws InvalidRequestException
+        public void execute(ByteBuffer rowKey, ColumnFamily cf, Composite prefix, UpdateParameters params) throws InvalidRequestException
         {
             Term.Terminal value = t.bind(params.variables);
             if (value == null)
@@ -283,11 +286,9 @@ public abstract class Sets
                                       ? Collections.singleton(((Constants.Value)value).bytes)
                                       : ((Sets.Value)value).elements;
 
-            ColumnNameBuilder column = prefix.add(columnName);
             for (ByteBuffer bb : toDiscard)
             {
-                ByteBuffer cellName = column.copy().add(bb).build();
-                cf.addColumn(params.makeTombstone(cellName));
+                cf.addColumn(params.makeTombstone(cf.getComparator().create(prefix, column.name, bb)));
             }
         }
     }

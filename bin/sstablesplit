@@ -43,8 +43,8 @@ if [ -z $CLASSPATH ]; then
     exit 1
 fi
 
-$JAVA -ea -cp $CLASSPATH -Xmx256M \
-        -Dlog4j.configuration=log4j-tools.properties \
+$JAVA $JAVA_AGENT -ea -cp $CLASSPATH -Xmx256M \
+        -Dlogback.configurationFile=logback-tools.xml \
         org.apache.cassandra.tools.StandaloneSplitter "$@"
 
 # vi:ai sw=4 ts=4 tw=0 et

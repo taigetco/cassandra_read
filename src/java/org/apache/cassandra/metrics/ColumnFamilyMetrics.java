@@ -25,8 +25,8 @@ import com.yammer.metrics.util.RatioGauge;
 
 import org.apache.cassandra.db.ColumnFamilyStore;
 import org.apache.cassandra.db.Keyspace;
-import org.apache.cassandra.io.sstable.SSTableMetadata;
 import org.apache.cassandra.io.sstable.SSTableReader;
+import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.utils.EstimatedHistogram;
 
 /**
@@ -36,6 +36,8 @@ public class ColumnFamilyMetrics
 {
     /** Total amount of data stored in the memtable, including column related overhead. */
     public final Gauge<Long> memtableDataSize;
+    /** Total amount of data stored in the memtables (2i and pending flush memtables included). */
+    public final Gauge<Long> allMemtablesDataSize;
     /** Total number of columns present in the memtable. */
     public final Gauge<Long> memtableColumnsCount;
     /** Number of times flush has resulted in the memtable being switched out. */
@@ -119,6 +121,13 @@ public class ColumnFamilyMetrics
                 return cfs.getDataTracker().getMemtable().getLiveSize();
             }
         });
+        allMemtablesDataSize = Metrics.newGauge(factory.createMetricName("AllMemtablesDataSize"), new Gauge<Long>()
+        {
+            public Long value()
+            {
+                return cfs.getTotalAllMemtablesLiveSize();
+            }
+        });
         memtableSwitchCount = Metrics.newCounter(factory.createMetricName("MemtableSwitchCount"));
         estimatedRowSizeHistogram = Metrics.newGauge(factory.createMetricName("EstimatedRowSizeHistogram"), new Gauge<long[]>()
         {
@@ -157,13 +166,13 @@ public class ColumnFamilyMetrics
                 int total = 0;
                 for (SSTableReader sstable : cfs.getSSTables())
                 {
-                    if (sstable.getCompressionRatio() != SSTableMetadata.NO_COMPRESSION_RATIO)
+                    if (sstable.getCompressionRatio() != MetadataCollector.NO_COMPRESSION_RATIO)
                     {
                         sum += sstable.getCompressionRatio();
                         total++;
                     }
                 }
-                return total != 0 ? (double) sum / total : 0;
+                return total != 0 ? sum / total : 0;
             }
         });
         readLatency = new LatencyMetrics(factory, "Read");
@@ -334,6 +343,7 @@ public class ColumnFamilyMetrics
     {
         readLatency.release();
         writeLatency.release();
+        Metrics.defaultRegistry().removeMetric(factory.createMetricName("AllMemtablesDataSize"));
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("MemtableColumnsCount"));
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("MemtableDataSize"));
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("MemtableSwitchCount"));
@@ -354,7 +364,7 @@ public class ColumnFamilyMetrics
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("RecentBloomFilterFalseRatio"));
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("BloomFilterDiskSpaceUsed"));
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("KeyCacheHitRate"));
-        Metrics.defaultRegistry().removeMetric(factory.createMetricName("SpeculativeRetry"));
+        Metrics.defaultRegistry().removeMetric(factory.createMetricName("SpeculativeRetries"));
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("TombstoneScannedHistogram"));
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("LiveScannedHistogram"));
         Metrics.defaultRegistry().removeMetric(factory.createMetricName("CoordinatorReadLatency"));

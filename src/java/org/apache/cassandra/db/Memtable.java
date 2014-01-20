@@ -32,12 +32,12 @@ import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.db.composites.CellNameType;
 import org.apache.cassandra.db.commitlog.ReplayPosition;
 import org.apache.cassandra.db.index.SecondaryIndexManager;
-import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.io.sstable.SSTableMetadata;
 import org.apache.cassandra.io.sstable.SSTableReader;
 import org.apache.cassandra.io.sstable.SSTableWriter;
+import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.DiskAwareRunnable;
 import org.apache.cassandra.utils.Allocator;
 import org.github.jamm.MemoryMeter;
@@ -93,16 +93,16 @@ public class Memtable
     // We index the memtable by RowPosition only for the purpose of being able
     // to select key range using Token.KeyBound. However put() ensures that we
     // actually only store DecoratedKey.
-    private final ConcurrentNavigableMap<RowPosition, AtomicSortedColumns> rows = new ConcurrentSkipListMap<RowPosition, AtomicSortedColumns>();
+    private final ConcurrentNavigableMap<RowPosition, AtomicBTreeColumns> rows = new ConcurrentSkipListMap<>();
     public final ColumnFamilyStore cfs;
     private final long creationTime = System.currentTimeMillis();
     private final long creationNano = System.nanoTime();
 
     private final Allocator allocator = DatabaseDescriptor.getMemtableAllocator();
     // We really only need one column by allocator but one by memtable is not a big waste and avoids needing allocators to know about CFS
-    private final Function<Column, Column> localCopyFunction = new Function<Column, Column>()
+    private final Function<Cell, Cell> localCopyFunction = new Function<Cell, Cell>()
     {
-        public Column apply(Column c)
+        public Cell apply(Cell c)
         {
             return c.localCopy(cfs, allocator);
         }
@@ -111,7 +111,7 @@ public class Memtable
     // Record the comparator of the CFS at the creation of the memtable. This
     // is only used when a user update the CF comparator, to know if the
     // memtable was created with the new or old comparator.
-    public final AbstractType initialComparator;
+    public final CellNameType initialComparator;
 
     public Memtable(ColumnFamilyStore cfs)
     {
@@ -180,11 +180,11 @@ public class Memtable
 
     private void resolve(DecoratedKey key, ColumnFamily cf, SecondaryIndexManager.Updater indexer)
     {
-        AtomicSortedColumns previous = rows.get(key);
+        AtomicBTreeColumns previous = rows.get(key);
 
         if (previous == null)
         {
-            AtomicSortedColumns empty = cf.cloneMeShallow(AtomicSortedColumns.factory, false);
+            AtomicBTreeColumns empty = cf.cloneMeShallow(AtomicBTreeColumns.factory, false);
             // We'll add the columns later. This avoids wasting works if we get beaten in the putIfAbsent
             previous = rows.putIfAbsent(new DecoratedKey(key.token, allocator.clone(key.key)), empty);
             if (previous == null)
@@ -203,7 +203,7 @@ public class Memtable
     {
         StringBuilder builder = new StringBuilder();
         builder.append("{");
-        for (Map.Entry<RowPosition, AtomicSortedColumns> entry : rows.entrySet())
+        for (Map.Entry<RowPosition, AtomicBTreeColumns> entry : rows.entrySet())
         {
             builder.append(entry.getKey()).append(": ").append(entry.getValue()).append(", ");
         }
@@ -226,29 +226,29 @@ public class Memtable
      * @param startWith Include data in the result from and including this key and to the end of the memtable
      * @return An iterator of entries with the data from the start key
      */
-    public Iterator<Map.Entry<DecoratedKey, AtomicSortedColumns>> getEntryIterator(final RowPosition startWith, final RowPosition stopAt)
+    public Iterator<Map.Entry<DecoratedKey, AtomicBTreeColumns>> getEntryIterator(final RowPosition startWith, final RowPosition stopAt)
     {
-        return new Iterator<Map.Entry<DecoratedKey, AtomicSortedColumns>>()
+        return new Iterator<Map.Entry<DecoratedKey, AtomicBTreeColumns>>()
         {
-            private Iterator<Map.Entry<RowPosition, AtomicSortedColumns>> iter = stopAt.isMinimum(cfs.partitioner)
-                                                                               ? rows.tailMap(startWith).entrySet().iterator()
-                                                                               : rows.subMap(startWith, true, stopAt, true).entrySet().iterator();
-            private Map.Entry<RowPosition, AtomicSortedColumns> currentEntry;
+            private Iterator<? extends Map.Entry<RowPosition, AtomicBTreeColumns>> iter = stopAt.isMinimum(cfs.partitioner)
+                                                                                        ? rows.tailMap(startWith).entrySet().iterator()
+                                                                                        : rows.subMap(startWith, true, stopAt, true).entrySet().iterator();
+            private Map.Entry<RowPosition, AtomicBTreeColumns> currentEntry;
 
             public boolean hasNext()
             {
                 return iter.hasNext();
             }
 
-            public Map.Entry<DecoratedKey, AtomicSortedColumns> next()
+            public Map.Entry<DecoratedKey, AtomicBTreeColumns> next()
             {
-                Map.Entry<RowPosition, AtomicSortedColumns> entry = iter.next();
+                Map.Entry<RowPosition, AtomicBTreeColumns> entry = iter.next();
                 // Store the reference to the current entry so that remove() can update the current size.
                 currentEntry = entry;
                 // Actual stored key should be true DecoratedKey
                 assert entry.getKey() instanceof DecoratedKey;
                 // Object cast is required since otherwise we can't turn RowPosition into DecoratedKey
-                return (Map.Entry<DecoratedKey, AtomicSortedColumns>) (Object)entry;
+                return (Map.Entry<DecoratedKey, AtomicBTreeColumns>) (Object)entry;
             }
 
             public void remove()
@@ -339,7 +339,7 @@ public class Memtable
             {
                 // (we can't clear out the map as-we-go to free up memory,
                 //  since the memtable is being used for queries in the "pending flush" category)
-                for (Map.Entry<RowPosition, AtomicSortedColumns> entry : rows.entrySet())
+                for (Map.Entry<RowPosition, AtomicBTreeColumns> entry : rows.entrySet())
                 {
                     ColumnFamily cf = entry.getValue();
                     if (cf.isMarkedForDelete())
@@ -351,16 +351,6 @@ public class Memtable
                         // See CASSANDRA-4667.
                         if (cfs.name.equals(SystemKeyspace.BATCHLOG_CF) && cfs.keyspace.getName().equals(Keyspace.SYSTEM_KS) && !(cf.getColumnCount() == 0))
                             continue;
-
-                        // Pedantically, you could purge column level tombstones that are past GcGRace when writing to the SSTable.
-                        // But it can result in unexpected behaviour where deletes never make it to disk,
-                        // as they are lost and so cannot override existing column values. So we only remove deleted columns if there
-                        // is a CF level tombstone to ensure the delete makes it into an SSTable.
-                        // We also shouldn't be dropping any columns obsoleted by partition and/or range tombstones in case
-                        // the table has secondary indexes, or else the stale entries wouldn't be cleaned up during compaction,
-                        // and will only be dropped during 2i query read-repair, if at all.
-                        if (!cfs.indexManager.hasIndexes())
-                            currentSize.addAndGet(-ColumnFamilyStore.removeDeletedColumnsOnly(cf, Integer.MIN_VALUE));
                     }
 
                     if (cf.getColumnCount() > 0 || cf.isMarkedForDelete())
@@ -391,7 +381,7 @@ public class Memtable
 
         public SSTableWriter createFlushWriter(String filename) throws ExecutionException, InterruptedException
         {
-            SSTableMetadata.Collector sstableMetadataCollector = SSTableMetadata.createCollector(cfs.metadata.comparator).replayPosition(context.get());
+            MetadataCollector sstableMetadataCollector = new MetadataCollector(cfs.metadata.comparator).replayPosition(context.get());
             return new SSTableWriter(filename,
                                      rows.size(),
                                      cfs.metadata,
@@ -423,7 +413,7 @@ public class Memtable
                 // So to reduce the memory overhead of doing a measurement, we break it up to row-at-a-time.
                 long deepSize = memtable.meter.measure(memtable.rows);
                 int objects = 0;
-                for (Map.Entry<RowPosition, AtomicSortedColumns> entry : memtable.rows.entrySet())
+                for (Map.Entry<RowPosition, AtomicBTreeColumns> entry : memtable.rows.entrySet())
                 {
                     deepSize += memtable.meter.measureDeep(entry.getKey()) + memtable.meter.measureDeep(entry.getValue());
                     objects += entry.getValue().getColumnCount();

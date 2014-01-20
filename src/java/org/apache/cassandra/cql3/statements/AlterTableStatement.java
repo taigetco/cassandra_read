@@ -17,9 +17,7 @@
  */
 package org.apache.cassandra.cql3.statements;
 
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -43,12 +41,12 @@ public class AlterTableStatement extends SchemaAlteringStatement
     }
 
     public final Type oType;
-    public final CQL3Type validator;
+    public final CQL3Type.Raw validator;
     public final ColumnIdentifier columnName;
     private final CFPropDefs cfProps;
     private final Map<ColumnIdentifier, ColumnIdentifier> renames;
 
-    public AlterTableStatement(CFName name, Type type, ColumnIdentifier columnName, CQL3Type validator, CFPropDefs cfProps, Map<ColumnIdentifier, ColumnIdentifier> renames)
+    public AlterTableStatement(CFName name, Type type, ColumnIdentifier columnName, CQL3Type.Raw validator, CFPropDefs cfProps, Map<ColumnIdentifier, ColumnIdentifier> renames)
     {
         super(name);
         this.oType = type;
@@ -73,11 +71,13 @@ public class AlterTableStatement extends SchemaAlteringStatement
         CFMetaData meta = validateColumnFamily(keyspace(), columnFamily());
         CFMetaData cfm = meta.clone();
 
+        CQL3Type validator = this.validator == null ? null : this.validator.prepare(keyspace());
+
         ColumnDefinition def = columnName == null ? null : cfm.getColumnDefinition(columnName);
         switch (oType)
         {
             case ADD:
-                if (cfm.isDense())
+                if (cfm.comparator.isDense())
                     throw new InvalidRequestException("Cannot add new column to a compact CF");
                 if (def != null)
                 {
@@ -94,34 +94,21 @@ public class AlterTableStatement extends SchemaAlteringStatement
                 AbstractType<?> type = validator.getType();
                 if (type instanceof CollectionType)
                 {
-                    if (!cfm.hasCompositeComparator())
+                    if (!cfm.comparator.supportCollections())
                         throw new InvalidRequestException("Cannot use collection types with non-composite PRIMARY KEY");
                     if (cfm.isSuper())
                         throw new InvalidRequestException("Cannot use collection types with Super column family");
 
-                    Map<ByteBuffer, CollectionType> collections = cfm.hasCollections()
-                                                                ? new HashMap<ByteBuffer, CollectionType>(cfm.getCollectionType().defined)
-                                                                : new HashMap<ByteBuffer, CollectionType>();
-
-                    collections.put(columnName.bytes, (CollectionType)type);
-                    ColumnToCollectionType newColType = ColumnToCollectionType.getInstance(collections);
-                    List<AbstractType<?>> ctypes = new ArrayList<AbstractType<?>>(((CompositeType)cfm.comparator).types);
-                    if (cfm.hasCollections())
-                        ctypes.set(ctypes.size() - 1, newColType);
-                    else
-                        ctypes.add(newColType);
-                    cfm.comparator = CompositeType.getInstance(ctypes);
+                    cfm.comparator = cfm.comparator.addCollection(columnName, (CollectionType)type);
                 }
 
-                Integer componentIndex = meta.hasCompositeComparator()
-                                       ? ((CompositeType)meta.comparator).types.size() - (meta.hasCollections() ? 2 : 1)
-                                       : null;
+                Integer componentIndex = cfm.comparator.isCompound() ? cfm.comparator.clusteringPrefixSize() : null;
                 cfm.addColumnDefinition(ColumnDefinition.regularDef(cfm, columnName.bytes, type, componentIndex));
                 break;
 
             case ALTER:
                 if (def == null)
-                    throw new InvalidRequestException(String.format("Column %s was not found in table %s", columnName, columnFamily()));
+                    throw new InvalidRequestException(String.format("Cell %s was not found in table %s", columnName, columnFamily()));
 
                 switch (def.kind)
                 {
@@ -153,19 +140,17 @@ public class AlterTableStatement extends SchemaAlteringStatement
                         }
                         break;
                     case CLUSTERING_COLUMN:
-                        assert cfm.hasCompositeComparator();
-                        List<AbstractType<?>> oldTypes = ((CompositeType) cfm.comparator).types;
+                        AbstractType<?> oldType = cfm.comparator.subtype(def.position());
                         // Note that CFMetaData.validateCompatibility already validate the change we're about to do. However, the error message it
                         // sends is a bit cryptic for a CQL3 user, so validating here for a sake of returning a better error message
                         // Do note that we need isCompatibleWith here, not just isValueCompatibleWith.
-                        if (!validator.getType().isCompatibleWith(oldTypes.get(def.position())))
+                        if (!validator.getType().isCompatibleWith(oldType))
                             throw new ConfigurationException(String.format("Cannot change %s from type %s to type %s: types are not order-compatible.",
                                                                            columnName,
-                                                                           oldTypes.get(def.position()).asCQL3Type(),
+                                                                           oldType.asCQL3Type(),
                                                                            validator));
-                        List<AbstractType<?>> newTypes = new ArrayList<AbstractType<?>>(oldTypes);
-                        newTypes.set(def.position(), validator.getType());
-                        cfm.comparator = CompositeType.getInstance(newTypes);
+
+                        cfm.comparator = cfm.comparator.setSubtype(def.position(), validator.getType());
                         break;
                     case COMPACT_VALUE:
                         // See below
@@ -195,12 +180,10 @@ public class AlterTableStatement extends SchemaAlteringStatement
                 break;
 
             case DROP:
-                if (cfm.isDense())
-                    throw new InvalidRequestException("Cannot drop columns from a compact CF");
-                if (!cfm.hasCompositeComparator())
+                if (!cfm.isCQL3Table())
                     throw new InvalidRequestException("Cannot drop columns from a non-CQL3 CF");
                 if (def == null)
-                    throw new InvalidRequestException(String.format("Column %s was not found in table %s", columnName, columnFamily()));
+                    throw new InvalidRequestException(String.format("Cell %s was not found in table %s", columnName, columnFamily()));
 
                 switch (def.kind)
                 {

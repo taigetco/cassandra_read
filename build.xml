@@ -37,6 +37,7 @@
     <property name="build.src.resources" value="${basedir}/src/resources"/>
     <property name="build.src.gen-java" value="${basedir}/src/gen-java"/>
     <property name="build.lib" value="${basedir}/lib"/>
+    <property name="build.tools.lib" value="${basedir}/tools/lib"/>
     <property name="build.dir" value="${basedir}/build"/>
     <property name="build.dir.lib" value="${basedir}/build/lib"/>
     <property name="build.test.dir" value="${build.dir}/test"/>
@@ -343,6 +344,7 @@
           <dependency groupId="commons-cli" artifactId="commons-cli" version="1.1"/>
           <dependency groupId="commons-codec" artifactId="commons-codec" version="1.2"/>
           <dependency groupId="org.apache.commons" artifactId="commons-lang3" version="3.1"/>
+          <dependency groupId="org.apache.commons" artifactId="commons-math3" version="3.2"/>
           <dependency groupId="com.googlecode.concurrentlinkedhashmap" artifactId="concurrentlinkedhashmap-lru" version="1.3"/>
           <dependency groupId="org.antlr" artifactId="antlr" version="3.2"/>
           <dependency groupId="org.slf4j" artifactId="slf4j-api" version="1.7.2"/>
@@ -356,7 +358,7 @@
           <dependency groupId="com.googlecode.json-simple" artifactId="json-simple" version="1.1"/>
           <dependency groupId="com.github.stephenc.high-scale-lib" artifactId="high-scale-lib" version="1.1.2"/>
           <dependency groupId="com.github.stephenc" artifactId="jamm" version="0.2.5"/>
-          <dependency groupId="com.thinkaurelius.thrift" artifactId="thrift-server" version="0.3.2">
+          <dependency groupId="com.thinkaurelius.thrift" artifactId="thrift-server" version="0.3.3">
 	      	<exclusion groupId="org.slf4j" artifactId="slf4j-log4j12"/>
           </dependency>
           <dependency groupId="org.yaml" artifactId="snakeyaml" version="1.11"/>
@@ -382,8 +384,10 @@
           <dependency groupId="com.addthis.metrics" artifactId="reporter-config" version="2.1.0" />
           <dependency groupId="edu.stanford.ppl" artifactId="snaptree" version="0.1" />
           <dependency groupId="org.mindrot" artifactId="jbcrypt" version="0.3m" />
+          <dependency groupId="io.airlift" artifactId="airline" version="0.6" />
           <dependency groupId="io.netty" artifactId="netty" version="3.6.6.Final" />
           <dependency groupId="com.google.code.findbugs" artifactId="jsr305" version="2.0.2" />
+          <dependency groupId="com.clearspring.analytics" artifactId="stream" version="2.5.1" />
         </dependencyManagement>
         <developer id="alakshman" name="Avinash Lakshman"/>
         <developer id="antelder" name="Anthony Elder"/>
@@ -413,9 +417,9 @@
         <dependency groupId="org.apache.hadoop" artifactId="hadoop-core"/>
       	<dependency groupId="org.apache.hadoop" artifactId="hadoop-minicluster"/>
         <dependency groupId="org.apache.pig" artifactId="pig"/>
-
         <dependency groupId="net.java.dev.jna" artifactId="jna"/>
       	<dependency groupId="com.google.code.findbugs" artifactId="jsr305"/>
+        <dependency groupId="io.airlift" artifactId="airline"/>
       </artifact:pom>
 
       <artifact:pom id="coverage-deps-pom"
@@ -431,6 +435,9 @@
         <parent groupId="org.apache.cassandra"
                 artifactId="cassandra-parent"
                 version="${version}"/>
+        <dependency groupId="joda-time" artifactId="joda-time" version="2.3" />
+        <dependency groupId="org.slf4j" artifactId="slf4j-log4j12" version="1.7.2"/>
+        <dependency groupId="log4j" artifactId="log4j" version="1.2.16" />
       </artifact:pom>
 
       <!-- now the pom's for artifacts being deployed to Maven Central -->
@@ -450,6 +457,7 @@
         <dependency groupId="commons-cli" artifactId="commons-cli"/>
         <dependency groupId="commons-codec" artifactId="commons-codec"/>
         <dependency groupId="org.apache.commons" artifactId="commons-lang3"/>
+        <dependency groupId="org.apache.commons" artifactId="commons-math3"/>
         <dependency groupId="com.googlecode.concurrentlinkedhashmap" artifactId="concurrentlinkedhashmap-lru"/>
         <dependency groupId="org.antlr" artifactId="antlr"/>
         <dependency groupId="org.slf4j" artifactId="slf4j-api"/>
@@ -463,7 +471,8 @@
         <dependency groupId="org.mindrot" artifactId="jbcrypt"/>
         <dependency groupId="com.yammer.metrics" artifactId="metrics-core"/>
         <dependency groupId="com.addthis.metrics" artifactId="reporter-config"/>
-        <dependency groupId="com.thinkaurelius.thrift" artifactId="thrift-server" version="0.3.2"/>
+        <dependency groupId="com.thinkaurelius.thrift" artifactId="thrift-server" version="0.3.3"/>
+        <dependency groupId="com.clearspring.analytics" artifactId="stream" version="2.5.1" />
 
         <dependency groupId="ch.qos.logback" artifactId="logback-core"/>
         <dependency groupId="ch.qos.logback" artifactId="logback-classic"/>
@@ -563,6 +572,25 @@
       </copy>
     </target>
 
+    <target name="maven-ant-tasks-retrieve-pig-test" depends="maven-ant-tasks-init">
+      <artifact:dependencies pomRefId="test-deps-pom"
+                             filesetId="test-dependency-jars"
+                             sourcesFilesetId="test-dependency-sources"
+                             cacheDependencyRefs="true"
+                             dependencyRefsBuildFile="${build.dir}/test-dependencies.xml">
+        <remoteRepository refid="apache"/>
+        <remoteRepository refid="central"/>
+        <remoteRepository refid="java.net2"/>
+      </artifact:dependencies>
+      <copy todir="${build.dir.lib}/jars">
+        <fileset refid="test-dependency-jars"/>
+        <mapper type="flatten"/>
+      </copy>
+      <copy todir="${build.dir.lib}/sources">
+        <fileset refid="test-dependency-sources"/>
+        <mapper type="flatten"/>
+      </copy>
+    </target>
 
     <!--
        Generate thrift code.  We have targets to build java because
@@ -678,6 +706,9 @@
                 <path refid="cassandra.classes" />
                 <path>
                     <fileset dir="${build.lib}">
+                        <include name="**/*.jar" />
+                    </fileset>
+                    <fileset dir="${build.tools.lib}">
                         <include name="**/*.jar" />
                     </fileset>
                 </path>
@@ -995,6 +1026,7 @@
       </classpath>
       <src path="${test.unit.src}"/>
       <src path="${test.long.src}"/>
+      <src path="${test.pig.src}"/>
     </javac>
 
     <!-- Non-java resources needed by the test suite -->
@@ -1132,7 +1164,7 @@
     </testmacro>
   </target>
 
-  <target name="pig-test" depends="build-test" description="Excute Pig tests">
+  <target name="pig-test" depends="build-test,maven-ant-tasks-retrieve-pig-test" description="Excute Pig tests">
     <testmacro suitename="pig" inputdir="${test.pig.src}" 
                timeout="1200000">
     </testmacro>
@@ -1248,6 +1280,7 @@
   <classpathentry kind="src" path="interface/thrift/gen-java"/>
   <classpathentry kind="src" path="test/unit"/>
   <classpathentry kind="src" path="test/long"/>
+  <classpathentry kind="src" path="test/pig"/>
   <classpathentry kind="src" path="tools/stress/src"/>
   <classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER"/>
   <classpathentry kind="output" path="build/classes/main"/>

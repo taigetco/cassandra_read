@@ -64,7 +64,7 @@ import org.apache.cassandra.utils.SimpleCondition;
 /**
  * JMX client operations for Cassandra.
  */
-public class NodeProbe
+public class NodeProbe implements AutoCloseable
 {
     private static final String fmtUrl = "service:jmx:rmi:///jndi/rmi://%s:%d/jmxrmi";
     private static final String ssObjName = "org.apache.cassandra.db:type=StorageService";
@@ -216,14 +216,14 @@ public class NodeProbe
         ssProxy.forceKeyspaceRepair(keyspaceName, isSequential, isLocal, columnFamilies);
     }
 
-    public void forceRepairAsync(final PrintStream out, final String keyspaceName, boolean isSequential, boolean isLocal, boolean primaryRange, String... columnFamilies) throws IOException
+    public void forceRepairAsync(final PrintStream out, final String keyspaceName, boolean isSequential, Collection<String> dataCenters, boolean primaryRange, String... columnFamilies) throws IOException
     {
         RepairRunner runner = new RepairRunner(out, keyspaceName, columnFamilies);
         try
         {
             jmxc.addConnectionNotificationListener(runner, null, null);
             ssProxy.addNotificationListener(runner, null, null);
-            if (!runner.repairAndWait(ssProxy, isSequential, isLocal, primaryRange))
+            if (!runner.repairAndWait(ssProxy, isSequential, dataCenters, primaryRange))
                 failed = true;
         }
         catch (Exception e)
@@ -241,14 +241,14 @@ public class NodeProbe
         }
     }
 
-    public void forceRepairRangeAsync(final PrintStream out, final String keyspaceName, boolean isSequential, boolean isLocal, final String startToken, final String endToken, String... columnFamilies) throws IOException
+    public void forceRepairRangeAsync(final PrintStream out, final String keyspaceName, boolean isSequential, Collection<String> dataCenters, final String startToken, final String endToken, String... columnFamilies) throws IOException
     {
         RepairRunner runner = new RepairRunner(out, keyspaceName, columnFamilies);
         try
         {
             jmxc.addConnectionNotificationListener(runner, null, null);
             ssProxy.addNotificationListener(runner, null, null);
-            if (!runner.repairRangeAndWait(ssProxy,  isSequential, isLocal, startToken, endToken))
+            if (!runner.repairRangeAndWait(ssProxy,  isSequential, dataCenters, startToken, endToken))
                 failed = true;
         }
         catch (Exception e)
@@ -727,6 +727,27 @@ public class NodeProbe
         hhProxy.pauseHintsDelivery(false);
     }
 
+    public void truncateHints(final String host)
+    {
+        hhProxy.deleteHintsForEndpoint(host);
+    }
+
+    public void truncateHints()
+    {
+        try
+        {
+            hhProxy.truncateAllHints();
+        }
+        catch (ExecutionException e)
+        {
+            throw new RuntimeException("Error while executing truncate hints", e);
+        }
+        catch (InterruptedException e)
+        {
+            throw new RuntimeException("Error while executing truncate hints", e);
+        }
+    }
+
     public void stopNativeTransport()
     {
         ssProxy.stopNativeTransport();
@@ -765,6 +786,11 @@ public class NodeProbe
     public boolean isThriftServerRunning()
     {
         return ssProxy.isRPCServerRunning();
+    }
+
+    public void stopCassandraDaemon()
+    {
+        ssProxy.stopDaemon();
     }
 
     public boolean isInitialized()
@@ -967,7 +993,7 @@ public class NodeProbe
 
     /**
      * Retrieve Proxy metrics
-     * @param scope; RangeSlice, Read or Write
+     * @param scope RangeSlice, Read or Write
      */
     public JmxReporter.TimerMBean getProxyMetric(String scope)
     {
@@ -985,7 +1011,7 @@ public class NodeProbe
 
     /**
      * Retrieve Proxy metrics
-     * @param metricName; CompletedTasks, PendingTasks, BytesCompacted or TotalCompactionsCompleted.
+     * @param metricName CompletedTasks, PendingTasks, BytesCompacted or TotalCompactionsCompleted.
      */
     public Object getCompactionMetric(String metricName)
     {
@@ -1018,7 +1044,7 @@ public class NodeProbe
 
     /**
      * Retrieve Proxy metrics
-     * @param metricName; Exceptions, Load, TotalHints or TotalHintsInProgress.
+     * @param metricName Exceptions, Load, TotalHints or TotalHintsInProgress.
      */
     public long getStorageMetric(String metricName)
     {
@@ -1183,16 +1209,16 @@ class RepairRunner implements NotificationListener
         this.columnFamilies = columnFamilies;
     }
 
-    public boolean repairAndWait(StorageServiceMBean ssProxy, boolean isSequential, boolean isLocal, boolean primaryRangeOnly) throws Exception
+    public boolean repairAndWait(StorageServiceMBean ssProxy, boolean isSequential, Collection<String> dataCenters, boolean primaryRangeOnly) throws Exception
     {
-        cmd = ssProxy.forceRepairAsync(keyspace, isSequential, isLocal, primaryRangeOnly, columnFamilies);
+        cmd = ssProxy.forceRepairAsync(keyspace, isSequential, dataCenters, primaryRangeOnly, columnFamilies);
         waitForRepair();
         return success;
     }
 
-    public boolean repairRangeAndWait(StorageServiceMBean ssProxy, boolean isSequential, boolean isLocal, String startToken, String endToken) throws Exception
+    public boolean repairRangeAndWait(StorageServiceMBean ssProxy, boolean isSequential, Collection<String> dataCenters, String startToken, String endToken) throws Exception
     {
-        cmd = ssProxy.forceRepairRangeAsync(startToken, endToken, keyspace, isSequential, isLocal, columnFamilies);
+        cmd = ssProxy.forceRepairRangeAsync(startToken, endToken, keyspace, isSequential, dataCenters, columnFamilies);
         waitForRepair();
         return success;
     }

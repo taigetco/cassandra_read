@@ -46,6 +46,10 @@ hinted_handoff_throttle_in_kb: 1024
 # cross-dc handoff tends to be slower
 max_hints_delivery_threads: 2
 
+# Maximum throttle in KBs per second, total. This will be
+# reduced proportionally to the number of nodes in the cluster.
+batchlog_replay_throttle_in_kb: 1024
+
 # The following setting populates the page cache on memtable flush and compaction
 # WARNING: Enable this setting only when the whole node's data fits in memory.
 # Defaults to: false
@@ -153,7 +157,7 @@ key_cache_save_period: 14400
 row_cache_size_in_mb: 0
 
 # Duration in seconds after which Cassandra should
-# safe the row cache. Caches are saved to saved_caches_directory as specified
+# save the row cache. Caches are saved to saved_caches_directory as specified
 # in this configuration file.
 #
 # Saved caches greatly improve cold-start speeds, and is relatively cheap in

@@ -22,6 +22,7 @@ import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
@@ -585,6 +586,8 @@ public class TokenMetadata
         }
     }
 
+    private final AtomicReference<TokenMetadata> cachedTokenMap = new AtomicReference<TokenMetadata>();
+
     /**
      * Create a copy of TokenMetadata with only tokenToEndpointMap. That is, pending ranges,
      * bootstrap tokens and leaving endpoints are not included in the copy.
@@ -601,6 +604,31 @@ public class TokenMetadata
         finally
         {
             lock.readLock().unlock();
+        }
+    }
+
+    /**
+     * Return a cached TokenMetadata with only tokenToEndpointMap, i.e., the same as cloneOnlyTokenMap but
+     * uses a cached copy that is invalided when the ring changes, so in the common case
+     * no extra locking is required.
+     *
+     * Callers must *NOT* mutate the returned metadata object.
+     */
+    public TokenMetadata cachedOnlyTokenMap()
+    {
+        TokenMetadata tm = cachedTokenMap.get();
+        if (tm != null)
+            return tm;
+
+        // synchronize to prevent thundering herd (CASSANDRA-6345)
+        synchronized (this)
+        {
+            if ((tm = cachedTokenMap.get()) != null)
+                return tm;
+
+            tm = cloneOnlyTokenMap();
+            cachedTokenMap.set(tm);
+            return tm;
         }
     }
 
@@ -1057,6 +1085,7 @@ public class TokenMetadata
     public void invalidateCachedRings()
     {
         ringVersion++;
+        cachedTokenMap.set(null);
     }
 
     /**

@@ -47,7 +47,6 @@ public class CompactionController
     private final Set<SSTableReader> compacting;
 
     public final int gcBefore;
-    public final int mergeShardBefore;
 
     protected CompactionController(ColumnFamilyStore cfs, int maxValue)
     {
@@ -60,11 +59,6 @@ public class CompactionController
         this.cfs = cfs;
         this.gcBefore = gcBefore;
         this.compacting = compacting;
-        // If we merge an old CounterId id, we must make sure that no further increment for that id are in an active memtable.
-        // For that, we must make sure that this id was renewed before the creation of the oldest unflushed memtable. We
-        // add 5 minutes to be sure we're on the safe side in terms of thread safety (though we should be fine in our
-        // current 'stop all write during memtable switch' situation).
-        this.mergeShardBefore = (int) ((cfs.oldestUnflushedMemtable() + 5 * 3600) / 1000);
         Set<SSTableReader> overlapping = compacting == null ? null : cfs.getAndReferenceOverlappingSSTables(compacting);
         this.overlappingSSTables = overlapping == null ? Collections.<SSTableReader>emptySet() : overlapping;
         this.overlappingTree = overlapping == null ? null : DataTracker.buildIntervalTree(overlapping);
@@ -149,8 +143,9 @@ public class CompactionController
 
     /**
      * @return the largest timestamp before which it's okay to drop tombstones for the given partition;
-     * i.e., after the maxPurgeableTimestamp there may exist newer data that still needs to be supressed
-     * in other sstables.
+     * i.e., after the maxPurgeableTimestamp there may exist newer data that still needs to be suppressed
+     * in other sstables.  This returns the minimum timestamp for any SSTable that contains this partition and is not
+     * participating in this compaction, or LONG.MAX_VALUE if no such SSTable exists.
      */
     public long maxPurgeableTimestamp(DecoratedKey key)
     {

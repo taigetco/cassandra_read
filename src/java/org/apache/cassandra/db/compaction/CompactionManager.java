@@ -46,6 +46,7 @@ import org.apache.cassandra.dht.Bounds;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.*;
+import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.metrics.CompactionMetrics;
 import org.apache.cassandra.repair.Validator;
@@ -302,7 +303,7 @@ public class CompactionManager implements CompactionManagerMBean
     public void forceUserDefinedCompaction(String dataFiles)
     {
         String[] filenames = dataFiles.split(",");
-        Multimap<Pair<String, String>, Descriptor> descriptors = ArrayListMultimap.create();
+        Multimap<ColumnFamilyStore, Descriptor> descriptors = ArrayListMultimap.create();
 
         for (String filename : filenames)
         {
@@ -313,19 +314,14 @@ public class CompactionManager implements CompactionManagerMBean
                 logger.warn("Schema does not exist for file {}. Skipping.", filename);
                 continue;
             }
-            File directory = new File(desc.ksname + File.separator + desc.cfname);
             // group by keyspace/columnfamily
-            Pair<Descriptor, String> p = Descriptor.fromFilename(directory, filename.trim());
-            Pair<String, String> key = Pair.create(p.left.ksname, p.left.cfname);
-            descriptors.put(key, p.left);
+            ColumnFamilyStore cfs = Keyspace.open(desc.ksname).getColumnFamilyStore(desc.cfname);
+            descriptors.put(cfs, cfs.directories.find(filename.trim()));
         }
 
         List<Future<?>> futures = new ArrayList<>();
-        for (Pair<String, String> key : descriptors.keySet())
-        {
-            ColumnFamilyStore cfs = Keyspace.open(key.left).getColumnFamilyStore(key.right);
-            futures.add(submitUserDefined(cfs, descriptors.get(key), getDefaultGcBefore(cfs)));
-        }
+        for (ColumnFamilyStore cfs : descriptors.keySet())
+            futures.add(submitUserDefined(cfs, descriptors.get(cfs), getDefaultGcBefore(cfs)));
         FBUtilities.waitOnFutures(futures);
     }
 
@@ -368,16 +364,12 @@ public class CompactionManager implements CompactionManagerMBean
     }
 
     // This acquire a reference on the sstable
-    // This is not efficent, do not use in any critical path
+    // This is not efficient, do not use in any critical path
     private SSTableReader lookupSSTable(final ColumnFamilyStore cfs, Descriptor descriptor)
     {
         for (SSTableReader sstable : cfs.getSSTables())
         {
-            // .equals() with no other changes won't work because in sstable.descriptor, the directory is an absolute path.
-            // We could construct descriptor with an absolute path too but I haven't found any satisfying way to do that
-            // (DB.getDataFileLocationForTable() may not return the right path if you have multiple volumes). Hence the
-            // endsWith.
-            if (sstable.descriptor.toString().endsWith(descriptor.toString()))
+            if (sstable.descriptor.equals(descriptor))
                 return sstable;
         }
         return null;
@@ -549,7 +541,7 @@ public class CompactionManager implements CompactionManagerMBean
             long totalkeysWritten = 0;
 
             int expectedBloomFilterSize = Math.max(cfs.metadata.getIndexInterval(),
-                                                   (int) (SSTableReader.getApproximateKeyCount(Arrays.asList(sstable), cfs.metadata)));
+                                                   (int) (SSTableReader.getApproximateKeyCount(Arrays.asList(sstable))));
             if (logger.isDebugEnabled())
                 logger.debug("Expected bloom filter size : {}", expectedBloomFilterSize);
 
@@ -560,7 +552,7 @@ public class CompactionManager implements CompactionManagerMBean
                 throw new IOException("disk full");
 
             ICompactionScanner scanner = cleanupStrategy.getScanner(sstable, getRateLimiter());
-            CleanupInfo ci = new CleanupInfo(sstable, (SSTableScanner)scanner);
+            CleanupInfo ci = new CleanupInfo(sstable, scanner);
 
             metrics.beginCompaction(ci);
             SSTableWriter writer = createWriter(cfs,
@@ -624,7 +616,7 @@ public class CompactionManager implements CompactionManagerMBean
     {
         public static CleanupStrategy get(ColumnFamilyStore cfs, Collection<Range<Token>> ranges, CounterId.OneShotRenewer renewer)
         {
-            if (cfs.indexManager.hasIndexes() || cfs.metadata.getDefaultValidator().isCommutative())
+            if (cfs.indexManager.hasIndexes() || cfs.metadata.isCounter())
                 return new Full(cfs, ranges, renewer);
 
             return new Bounded(cfs, ranges);
@@ -667,7 +659,7 @@ public class CompactionManager implements CompactionManagerMBean
         {
             private final Collection<Range<Token>> ranges;
             private final ColumnFamilyStore cfs;
-            private List<Column> indexedColumnsInRow;
+            private List<Cell> indexedColumnsInRow;
             private final CounterId.OneShotRenewer renewer;
 
             public Full(ColumnFamilyStore cfs, Collection<Range<Token>> ranges, CounterId.OneShotRenewer renewer)
@@ -698,15 +690,15 @@ public class CompactionManager implements CompactionManagerMBean
                 while (row.hasNext())
                 {
                     OnDiskAtom column = row.next();
-                    if (column instanceof CounterColumn)
-                        renewer.maybeRenew((CounterColumn) column);
+                    if (column instanceof CounterCell)
+                        renewer.maybeRenew((CounterCell) column);
 
-                    if (column instanceof Column && cfs.indexManager.indexes((Column) column))
+                    if (column instanceof Cell && cfs.indexManager.indexes((Cell) column))
                     {
                         if (indexedColumnsInRow == null)
                             indexedColumnsInRow = new ArrayList<>();
 
-                        indexedColumnsInRow.add((Column) column);
+                        indexedColumnsInRow.add((Cell) column);
                     }
                 }
 
@@ -738,7 +730,7 @@ public class CompactionManager implements CompactionManagerMBean
                                  expectedBloomFilterSize,
                                  cfs.metadata,
                                  cfs.partitioner,
-                                 SSTableMetadata.createCollector(Collections.singleton(sstable), cfs.metadata.comparator, sstable.getSSTableLevel()));
+                                 new MetadataCollector(Collections.singleton(sstable), cfs.metadata.comparator, sstable.getSSTableLevel()));
     }
 
     /**
@@ -1052,9 +1044,9 @@ public class CompactionManager implements CompactionManagerMBean
     private static class CleanupInfo extends CompactionInfo.Holder
     {
         private final SSTableReader sstable;
-        private final SSTableScanner scanner;
+        private final ICompactionScanner scanner;
 
-        public CleanupInfo(SSTableReader sstable, SSTableScanner scanner)
+        public CleanupInfo(SSTableReader sstable, ICompactionScanner scanner)
         {
             this.sstable = sstable;
             this.scanner = scanner;

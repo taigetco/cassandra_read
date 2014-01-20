@@ -20,11 +20,10 @@ package org.apache.cassandra.config;
  *
  */
 
-
+import org.junit.Assert;
 import org.junit.Test;
 
 import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.db.ColumnFamilyType;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
@@ -33,7 +32,7 @@ public class ColumnDefinitionTest
     @Test
     public void testSerializeDeserialize() throws Exception
     {
-        CFMetaData cfm = new CFMetaData("ks", "cf", ColumnFamilyType.Standard, UTF8Type.instance);
+        CFMetaData cfm = CFMetaData.denseCFMetaData("ks", "cf", UTF8Type.instance);
 
         ColumnDefinition cd0 = ColumnDefinition.regularDef(cfm, ByteBufferUtil.bytes("TestColumnDefinitionName0"), BytesType.instance, null)
                                                .setIndex("random index name 0", IndexType.KEYS, null);
@@ -47,8 +46,8 @@ public class ColumnDefinitionTest
     protected void testSerializeDeserialize(CFMetaData cfm, ColumnDefinition cd) throws Exception
     {
         ColumnDefinition newCd = ColumnDefinition.fromThrift(cfm, cd.toThrift());
-        assert cd != newCd;
-        assert cd.hashCode() == newCd.hashCode();
-        assert cd.equals(newCd);
+        Assert.assertNotSame(cd, newCd);
+        Assert.assertEquals(cd.hashCode(), newCd.hashCode());
+        Assert.assertEquals(cd, newCd);
     }
 }

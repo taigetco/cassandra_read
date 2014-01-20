@@ -22,18 +22,22 @@ import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.net.InetAddress;
 import java.util.Arrays;
+import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
 import javax.management.StandardMBean;
 
 import com.addthis.metrics.reporter.config.ReporterConfig;
-
 import com.google.common.collect.Iterables;
-import com.google.common.collect.SetMultimap;
+import com.google.common.util.concurrent.Uninterruptibles;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
+import org.apache.cassandra.concurrent.Stage;
+import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Schema;
@@ -125,6 +129,20 @@ public class CassandraDaemon
      */
         logger.info("Heap size: {}/{}", Runtime.getRuntime().totalMemory(), Runtime.getRuntime().maxMemory());
         logger.info("Classpath: {}", System.getProperty("java.class.path"));
+
+        // Fail-fast if JNA is not available or failing to initialize properly
+        // except with -Dcassandra.boot_without_jna=true. See CASSANDRA-6575.
+        if (!CLibrary.jnaAvailable())
+        {
+            boolean jnaRequired = !Boolean.getBoolean("cassandra.boot_without_jna");
+
+            if (jnaRequired)
+            {
+                logger.error("JNA failing to initialize properly. Use -Dcassandra.boot_without_jna=true to bootstrap even so.");
+                System.exit(3);
+            }
+        }
+
         CLibrary.tryMlockall();
 
         Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler()
@@ -185,7 +203,7 @@ public class CassandraDaemon
         // we do a one-off scrub of the system keyspace first; we can't load the list of the rest of the keyspaces,
         // until system keyspace is opened.
         for (CFMetaData cfm : Schema.instance.getKeyspaceMetaData(Keyspace.SYSTEM_KS).values())
-            ColumnFamilyStore.scrubDataDirectories(Keyspace.SYSTEM_KS, cfm.cfName);
+            ColumnFamilyStore.scrubDataDirectories(cfm);
         try
         {
             SystemKeyspace.checkHealth();
@@ -199,19 +217,21 @@ public class CassandraDaemon
         // load keyspace descriptions.
         DatabaseDescriptor.loadSchemas();
 
+        // clean up compaction leftovers
+        Map<Pair<String, String>, Map<Integer, UUID>> unfinishedCompactions = SystemKeyspace.getUnfinishedCompactions();
+        for (Pair<String, String> kscf : unfinishedCompactions.keySet())
+        {
+            CFMetaData cfm = Schema.instance.getCFMetaData(kscf.left, kscf.right);
+            ColumnFamilyStore.removeUnfinishedCompactionLeftovers(cfm, unfinishedCompactions.get(kscf));
+        }
+        SystemKeyspace.discardCompactionsInProgress();
+
         // clean up debris in the rest of the keyspaces
         for (String keyspaceName : Schema.instance.getKeyspaces())
         {
             for (CFMetaData cfm : Schema.instance.getKeyspaceMetaData(keyspaceName).values())
-                ColumnFamilyStore.scrubDataDirectories(keyspaceName, cfm.cfName);
+                ColumnFamilyStore.scrubDataDirectories(cfm);
         }
-        // clean up compaction leftovers
-        SetMultimap<Pair<String, String>, Integer> unfinishedCompactions = SystemKeyspace.getUnfinishedCompactions();
-        for (Pair<String, String> kscf : unfinishedCompactions.keySet())
-        {
-            ColumnFamilyStore.removeUnfinishedCompactionLeftovers(kscf.left, kscf.right, unfinishedCompactions.get(kscf));
-        }
-        SystemKeyspace.discardCompactionsInProgress();
 
         // initialize keyspaces
         for (String keyspaceName : Schema.instance.getKeyspaces())
@@ -317,6 +337,8 @@ public class CassandraDaemon
                 logger.warn("Failed to load metrics-reporter-config, metric sinks will not be activated", e);
             }
         }
+
+        waitForGossipToSettle();
 
         // Thift
         InetAddress rpcAddr = DatabaseDescriptor.getRpcAddress();
@@ -441,6 +463,50 @@ public class CassandraDaemon
     {
         stop();
         destroy();
+    }
+
+
+    private void waitForGossipToSettle()
+    {
+        int forceAfter = Integer.getInteger("cassandra.skip_wait_for_gossip_to_settle", -1);
+        if (forceAfter == 0)
+        {
+            return;
+        }
+        final int GOSSIP_SETTLE_MIN_WAIT_MS = 5000;
+        final int GOSSIP_SETTLE_POLL_INTERVAL_MS = 1000;
+        final int GOSSIP_SETTLE_POLL_SUCCESSES_REQUIRED = 3;
+
+        logger.info("waiting for gossip to settle before accepting client requests...");
+        Uninterruptibles.sleepUninterruptibly(GOSSIP_SETTLE_MIN_WAIT_MS, TimeUnit.MILLISECONDS);
+        int totalPolls = 0;
+        int numOkay = 0;
+        JMXEnabledThreadPoolExecutor gossipStage = (JMXEnabledThreadPoolExecutor)StageManager.getStage(Stage.GOSSIP);
+        while (numOkay < GOSSIP_SETTLE_POLL_SUCCESSES_REQUIRED)
+        {
+            Uninterruptibles.sleepUninterruptibly(GOSSIP_SETTLE_POLL_INTERVAL_MS, TimeUnit.MILLISECONDS);
+            long completed = gossipStage.getCompletedTasks();
+            long active = gossipStage.getActiveCount();
+            long pending = gossipStage.getPendingTasks();
+            totalPolls++;
+            if (active == 0 && pending == 0)
+            {
+                logger.debug("gossip looks settled. CompletedTasks: {}", completed);
+                numOkay++;
+            }
+            else
+            {
+                logger.info("gossip not settled after {} polls. Gossip Stage active/pending/completed: {}/{}/{}", totalPolls, active, pending, completed);
+                numOkay = 0;
+            }
+            if (forceAfter > 0 && totalPolls > forceAfter)
+            {
+                logger.warn("Gossip not settled but startup forced by cassandra.skip_wait_for_gossip_to_settle. Gossip Stage total/active/pending/completed: {}/{}/{}/{}",
+                            totalPolls, active, pending, completed);
+                break;
+            }
+        }
+        logger.info("gossip settled after {} extra polls; proceeding", totalPolls - GOSSIP_SETTLE_POLL_SUCCESSES_REQUIRED);
     }
 
     public static void stop(String[] args)
