@@ -22,6 +22,9 @@ import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.Map;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.cassandra.serializers.TypeSerializer;
@@ -49,6 +52,8 @@ import org.apache.cassandra.utils.ByteBufferUtil;
  */
 public class DynamicCompositeType extends AbstractCompositeType
 {
+    private static final Logger logger = LoggerFactory.getLogger(DynamicCompositeType.class);
+
     private final Map<Byte, AbstractType<?>> aliases;
 
     // interning instances
@@ -75,14 +80,20 @@ public class DynamicCompositeType extends AbstractCompositeType
         this.aliases = aliases;
     }
 
+    protected boolean readIsStatic(ByteBuffer bb)
+    {
+        // We don't have the static nothing for DCT
+        return false;
+    }
+
     private AbstractType<?> getComparator(ByteBuffer bb)
     {
         try
         {
-            int header = getShortLength(bb);
+            int header = ByteBufferUtil.readShortLength(bb);
             if ((header & 0x8000) == 0)
             {
-                String name = ByteBufferUtil.string(getBytes(bb, header));
+                String name = ByteBufferUtil.string(ByteBufferUtil.readBytes(bb, header));
                 return TypeParser.parse(name);
             }
             else
@@ -141,10 +152,10 @@ public class DynamicCompositeType extends AbstractCompositeType
     {
         try
         {
-            int header = getShortLength(bb);
+            int header = ByteBufferUtil.readShortLength(bb);
             if ((header & 0x8000) == 0)
             {
-                String name = ByteBufferUtil.string(getBytes(bb, header));
+                String name = ByteBufferUtil.string(ByteBufferUtil.readBytes(bb, header));
                 sb.append(name).append("@");
                 return TypeParser.parse(name);
             }
@@ -178,20 +189,32 @@ public class DynamicCompositeType extends AbstractCompositeType
         AbstractType<?> comparator = null;
         if (bb.remaining() < 2)
             throw new MarshalException("Not enough bytes to header of the comparator part of component " + i);
-        int header = getShortLength(bb);
+        int header = ByteBufferUtil.readShortLength(bb);
         if ((header & 0x8000) == 0)
         {
             if (bb.remaining() < header)
                 throw new MarshalException("Not enough bytes to read comparator name of component " + i);
 
-            ByteBuffer value = getBytes(bb, header);
+            ByteBuffer value = ByteBufferUtil.readBytes(bb, header);
+            String valueStr = null;
             try
             {
-                comparator = TypeParser.parse(ByteBufferUtil.string(value));
+                valueStr = ByteBufferUtil.string(value);
+                comparator = TypeParser.parse(valueStr);
+            }
+            catch (CharacterCodingException ce) 
+            {
+                // ByteBufferUtil.string failed. 
+                // Log it here and we'll further throw an exception below since comparator == null
+                logger.error("Failed with [{}] when decoding the byte buffer in ByteBufferUtil.string()", 
+                   ce.toString());
             }
             catch (Exception e)
             {
-                // we'll deal with this below since comparator == null
+                // parse failed. 
+                // Log it here and we'll further throw an exception below since comparator == null
+                logger.error("Failed to parse value string \"{}\" with exception: [{}]", 
+                   valueStr, e.toString());
             }
         }
         else
@@ -302,7 +325,7 @@ public class DynamicCompositeType extends AbstractCompositeType
                 header = 0x8000 | (((byte)comparatorName.charAt(0)) & 0xFF);
             else
                 header = comparatorName.length();
-            putShortLength(bb, header);
+            ByteBufferUtil.writeShortLength(bb, header);
 
             if (!isAlias)
                 bb.put(ByteBufferUtil.bytes(comparatorName));

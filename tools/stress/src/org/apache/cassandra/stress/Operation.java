@@ -19,21 +19,24 @@ package org.apache.cassandra.stress;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 
+import org.apache.cassandra.stress.generatedata.Distribution;
 import org.apache.cassandra.stress.generatedata.KeyGen;
 import org.apache.cassandra.stress.generatedata.RowGen;
-import org.apache.cassandra.stress.settings.Command;
-import org.apache.cassandra.stress.settings.CqlVersion;
-import org.apache.cassandra.stress.settings.SettingsCommandMixed;
-import org.apache.cassandra.stress.settings.StressSettings;
+import org.apache.cassandra.stress.settings.*;
 import org.apache.cassandra.stress.util.JavaDriverClient;
 import org.apache.cassandra.stress.util.ThriftClient;
 import org.apache.cassandra.stress.util.Timer;
 import org.apache.cassandra.thrift.ColumnParent;
 import org.apache.cassandra.thrift.InvalidRequestException;
+import org.apache.cassandra.thrift.SlicePredicate;
+import org.apache.cassandra.thrift.SliceRange;
 import org.apache.cassandra.transport.SimpleClient;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
@@ -64,9 +67,11 @@ public abstract class Operation
         public final Command type;
         public final KeyGen keyGen;
         public final RowGen rowGen;
+        public final Distribution counteradd;
         public final List<ColumnParent> columnParents;
         public final StressMetrics metrics;
-        public final SettingsCommandMixed.CommandSelector readWriteSelector;
+        public final SettingsCommandMixed.CommandSelector commandSelector;
+        private final EnumMap<Command, State> substates;
         private Object cqlCache;
 
         public State(Command type, StressSettings settings, StressMetrics metrics)
@@ -74,30 +79,55 @@ public abstract class Operation
             this.type = type;
             this.timer = metrics.getTiming().newTimer();
             if (type == Command.MIXED)
-                readWriteSelector = ((SettingsCommandMixed) settings.command).selector();
+            {
+                commandSelector = ((SettingsCommandMixed) settings.command).selector();
+                substates = new EnumMap<>(Command.class);
+            }
             else
-                readWriteSelector = null;
+            {
+                commandSelector = null;
+                substates = null;
+            }
+            counteradd = settings.command.add.get();
             this.settings = settings;
             this.keyGen = settings.keys.newKeyGen();
             this.rowGen = settings.columns.newRowGen();
             this.metrics = metrics;
+            this.columnParents = columnParents(type, settings);
+        }
+
+        private State(Command type, State copy)
+        {
+            this.type = type;
+            this.timer = copy.timer;
+            this.rowGen = copy.rowGen;
+            this.keyGen = copy.keyGen;
+            this.columnParents = columnParents(type, copy.settings);
+            this.metrics = copy.metrics;
+            this.settings = copy.settings;
+            this.counteradd = copy.counteradd;
+            this.substates = null;
+            this.commandSelector = null;
+        }
+
+        private List<ColumnParent> columnParents(Command type, StressSettings settings)
+        {
             if (!settings.columns.useSuperColumns)
-                columnParents = Collections.singletonList(new ColumnParent(settings.schema.columnFamily));
+                return Collections.singletonList(new ColumnParent(type.table));
             else
             {
                 ColumnParent[] cp = new ColumnParent[settings.columns.superColumns];
                 for (int i = 0 ; i < cp.length ; i++)
-                    cp[i] = new ColumnParent("Super1").setSuper_column(ByteBufferUtil.bytes("S" + i));
-                columnParents = Arrays.asList(cp);
+                    cp[i] = new ColumnParent(type.supertable).setSuper_column(ByteBufferUtil.bytes("S" + i));
+                return Arrays.asList(cp);
             }
         }
+
+
+
         public boolean isCql3()
         {
             return settings.mode.cqlVersion == CqlVersion.CQL3;
-        }
-        public boolean isCql2()
-        {
-            return settings.mode.cqlVersion == CqlVersion.CQL2;
         }
         public Object getCqlCache()
         {
@@ -107,6 +137,18 @@ public abstract class Operation
         {
             cqlCache = val;
         }
+
+        public State substate(Command command)
+        {
+            assert type == Command.MIXED;
+            State substate = substates.get(command);
+            if (substate == null)
+            {
+                substates.put(command, substate = new State(command, this));
+            }
+            return substate;
+        }
+
     }
 
     protected ByteBuffer getKey()
@@ -119,9 +161,56 @@ public abstract class Operation
         return state.keyGen.getKeys(count, index);
     }
 
-    protected List<ByteBuffer> generateColumnValues()
+    protected List<ByteBuffer> generateColumnValues(ByteBuffer key)
     {
-        return state.rowGen.generate(index);
+        return state.rowGen.generate(index, key);
+    }
+
+    private int sliceStart(int count)
+    {
+        if (count == state.settings.columns.maxColumnsPerKey)
+            return 0;
+        return 1 + ThreadLocalRandom.current().nextInt(state.settings.columns.maxColumnsPerKey - count);
+    }
+
+    protected SlicePredicate slicePredicate()
+    {
+        final SlicePredicate predicate = new SlicePredicate();
+        if (state.settings.columns.slice)
+        {
+            int count = state.rowGen.count(index);
+            int start = sliceStart(count);
+            predicate.setSlice_range(new SliceRange()
+                                     .setStart(state.settings.columns.names.get(start))
+                                     .setFinish(new byte[] {})
+                                     .setReversed(false)
+                                     .setCount(count)
+            );
+        }
+        else
+            predicate.setColumn_names(randomNames());
+        return predicate;
+    }
+
+    protected List<ByteBuffer> randomNames()
+    {
+        int count = state.rowGen.count(index);
+        List<ByteBuffer> src = state.settings.columns.names;
+        if (count == src.size())
+            return src;
+        ThreadLocalRandom rnd = ThreadLocalRandom.current();
+        List<ByteBuffer> r = new ArrayList<>();
+        int c = 0, o = 0;
+        while (c < count && count + o < src.size())
+        {
+            int leeway = src.size() - (count + o);
+            int spreadover = count - c;
+            o += Math.round(rnd.nextDouble() * (leeway / (double) spreadover));
+            r.add(src.get(o + c++));
+        }
+        while (c < count)
+            r.add(src.get(o + c++));
+        return r;
     }
 
     /**
@@ -146,20 +235,33 @@ public abstract class Operation
         boolean success = false;
         String exceptionMessage = null;
 
-        for (int t = 0; t < state.settings.command.tries; t++)
+        int tries = 0;
+        for (; tries < state.settings.command.tries; tries++)
         {
-            if (success)
-                break;
-
             try
             {
                 success = run.run();
+                break;
             }
             catch (Exception e)
             {
-                System.err.println(e);
+                switch (state.settings.log.level)
+                {
+                    case MINIMAL:
+                        break;
+
+                    case NORMAL:
+                        System.err.println(e);
+                        break;
+
+                    case VERBOSE:
+                        e.printStackTrace(System.err);
+                        break;
+
+                    default:
+                        throw new AssertionError();
+                }
                 exceptionMessage = getExceptionMessage(e);
-                success = false;
             }
         }
 
@@ -167,11 +269,14 @@ public abstract class Operation
 
         if (!success)
         {
-            error(String.format("Operation [%d] retried %d times - error executing for key %s %s%n",
+            error(String.format("Operation [%d] x%d key %s (0x%s) %s%n",
                     index,
-                    state.settings.command.tries,
+                    tries,
                     run.key(),
-                    (exceptionMessage == null) ? "" : "(" + exceptionMessage + ")"));
+                    ByteBufferUtil.bytesToHex(ByteBufferUtil.bytes(run.key())),
+                    (exceptionMessage == null)
+                        ? "Data returned was not validated"
+                        : "Error executing: " + exceptionMessage));
         }
 
     }
@@ -187,18 +292,8 @@ public abstract class Operation
     {
         if (!state.settings.command.ignoreErrors)
             throw new IOException(message);
-        else
+        else if (state.settings.log.level.compareTo(SettingsLog.Level.MINIMAL) > 0)
             System.err.println(message);
-    }
-
-    public static ByteBuffer getColumnNameBytes(int i)
-    {
-        return ByteBufferUtil.bytes("C" + i);
-    }
-
-    public static String getColumnName(int i)
-    {
-        return "C" + i;
     }
 
 }

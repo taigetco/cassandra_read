@@ -62,7 +62,9 @@ public class JavaDriverClient
     public void connect(ProtocolOptions.Compression compression) throws Exception
     {
         Cluster.Builder clusterBuilder = Cluster.builder()
-                .addContactPoint(host).withPort(port);
+                                                .addContactPoint(host)
+                                                .withPort(port)
+                                                .withoutMetrics(); // The driver uses metrics 3 with conflict with our version
         clusterBuilder.withCompression(compression);
         if (encryptionOptions.enabled)
         {
@@ -101,11 +103,11 @@ public class JavaDriverClient
         return getSession().execute(stmt);
     }
 
-    public ResultSet executePrepared(PreparedStatement stmt, List<ByteBuffer> queryParams, org.apache.cassandra.db.ConsistencyLevel consistency)
+    public ResultSet executePrepared(PreparedStatement stmt, List<Object> queryParams, org.apache.cassandra.db.ConsistencyLevel consistency)
     {
 
         stmt.setConsistencyLevel(from(consistency));
-        BoundStatement bstmt = stmt.bind((Object[]) queryParams.toArray(new ByteBuffer[queryParams.size()]));
+        BoundStatement bstmt = stmt.bind((Object[]) queryParams.toArray(new Object[queryParams.size()]));
         return getSession().execute(bstmt);
     }
 
@@ -142,7 +144,6 @@ public class JavaDriverClient
 
     public void disconnect()
     {
-        FBUtilities.waitOnFuture(cluster.shutdown());
+        cluster.close();
     }
-
 }

@@ -33,6 +33,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.cache.CachingOptions;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.KSMetaData;
@@ -111,6 +112,8 @@ public class SystemKeyspace
     {
         setupVersion();
 
+        migrateIndexInterval();
+        migrateCachingOption();
         // add entries to system schema columnfamilies for the hardcoded system definitions
         for (String ksname : Schema.systemKeyspaceNames)
         {
@@ -141,6 +144,66 @@ public class SystemKeyspace
                                          snitch.getDatacenter(FBUtilities.getBroadcastAddress()),
                                          snitch.getRack(FBUtilities.getBroadcastAddress()),
                                          DatabaseDescriptor.getPartitioner().getClass().getName()));
+    }
+
+    // TODO: In 3.0, remove this and the index_interval column from system.schema_columnfamilies
+    /** Migrates index_interval values to min_index_interval and sets index_interval to null */
+    private static void migrateIndexInterval()
+    {
+        for (UntypedResultSet.Row row : processInternal(String.format("SELECT * FROM system.%s", SCHEMA_COLUMNFAMILIES_CF)))
+        {
+            if (!row.has("index_interval"))
+                continue;
+
+            logger.debug("Migrating index_interval to min_index_interval");
+
+            CFMetaData table = CFMetaData.fromSchema(row);
+            String query = String.format("SELECT writetime(type) "
+                    + "FROM system.%s "
+                    + "WHERE keyspace_name = '%s' AND columnfamily_name = '%s'",
+                    SCHEMA_COLUMNFAMILIES_CF,
+                    table.ksName,
+                    table.cfName);
+            long timestamp = processInternal(query).one().getLong("writetime(type)");
+            try
+            {
+                table.toSchema(timestamp).apply();
+            }
+            catch (ConfigurationException e)
+            {
+                // shouldn't happen
+            }
+        }
+    }
+
+    private static void migrateCachingOption()
+    {
+        for (UntypedResultSet.Row row : processInternal(String.format("SELECT * FROM system.%s", SCHEMA_COLUMNFAMILIES_CF)))
+        {
+            if (!row.has("caching"))
+                continue;
+
+            if (!CachingOptions.isLegacy(row.getString("caching")))
+                continue;
+            try
+            {
+                CachingOptions caching = CachingOptions.fromString(row.getString("caching"));
+                CFMetaData table = CFMetaData.fromSchema(row);
+                logger.info("Migrating caching option {} to {} for {}.{}", row.getString("caching"), caching.toString(), table.ksName, table.cfName);
+                String query = String.format("SELECT writetime(type) "
+                        + "FROM system.%s "
+                        + "WHERE keyspace_name = '%s' AND columnfamily_name = '%s'",
+                        SCHEMA_COLUMNFAMILIES_CF,
+                        table.ksName,
+                        table.cfName);
+                long timestamp = processInternal(query).one().getLong("writetime(type)");
+                table.toSchema(timestamp).apply();
+            }
+            catch (ConfigurationException e)
+            {
+                // shouldn't happen
+            }
+        }
     }
 
     /**
@@ -693,27 +756,6 @@ public class SystemKeyspace
         forceBlockingFlush(COUNTER_ID_CF);
     }
 
-    public static List<CounterId.CounterIdRecord> getOldLocalCounterIds()
-    {
-        List<CounterId.CounterIdRecord> l = new ArrayList<CounterId.CounterIdRecord>();
-
-        Keyspace keyspace = Keyspace.open(Keyspace.SYSTEM_KS);
-        QueryFilter filter = QueryFilter.getIdentityFilter(decorate(ALL_LOCAL_NODE_ID_KEY), COUNTER_ID_CF, System.currentTimeMillis());
-        ColumnFamily cf = keyspace.getColumnFamilyStore(COUNTER_ID_CF).getColumnFamily(filter);
-
-        CounterId previous = null;
-        for (Cell c : cf)
-        {
-            if (previous != null)
-                l.add(new CounterId.CounterIdRecord(previous, c.timestamp()));
-
-            // this will ignore the last column on purpose since it is the
-            // current local node id
-            previous = CounterId.wrap(c.name().toByteBuffer());
-        }
-        return l;
-    }
-
     /**
      * @param cfName The name of the ColumnFamily responsible for part of the schema (keyspace, ColumnFamily, columns)
      * @return CFS responsible to hold low-level serialized schema
@@ -831,7 +873,7 @@ public class SystemKeyspace
             return new PaxosState(key, metadata);
         UntypedResultSet.Row row = results.one();
         Commit promised = row.has("in_progress_ballot")
-                        ? new Commit(key, row.getUUID("in_progress_ballot"), EmptyColumns.factory.create(metadata))
+                        ? new Commit(key, row.getUUID("in_progress_ballot"), ArrayBackedSortedColumns.factory.create(metadata))
                         : Commit.emptyCommit(key, metadata);
         // either we have both a recently accepted ballot and update or we have neither
         Commit accepted = row.has("proposal")

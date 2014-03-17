@@ -17,14 +17,15 @@
  */
 package org.apache.cassandra.db.marshal;
 
-import org.apache.cassandra.serializers.TypeSerializer;
-import org.apache.cassandra.serializers.BytesSerializer;
-import org.apache.cassandra.serializers.MarshalException;
-
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+
+import org.apache.cassandra.serializers.TypeSerializer;
+import org.apache.cassandra.serializers.BytesSerializer;
+import org.apache.cassandra.serializers.MarshalException;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 /**
  * A class avoiding class duplication between CompositeType and
@@ -34,43 +35,21 @@ import java.util.List;
  */
 public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
 {
-    // changes bb position
-    public static int getShortLength(ByteBuffer bb)
-    {
-        int length = (bb.get() & 0xFF) << 8;
-        return length | (bb.get() & 0xFF);
-    }
-
-    // changes bb position
-    public static void putShortLength(ByteBuffer bb, int length)
-    {
-        bb.put((byte) ((length >> 8) & 0xFF));
-        bb.put((byte) (length & 0xFF));
-    }
-
-    // changes bb position
-    public static ByteBuffer getBytes(ByteBuffer bb, int length)
-    {
-        ByteBuffer copy = bb.duplicate();
-        copy.limit(copy.position() + length);
-        bb.position(bb.position() + length);
-        return copy;
-    }
-
-    // changes bb position
-    public static ByteBuffer getWithShortLength(ByteBuffer bb)
-    {
-        int length = getShortLength(bb);
-        return getBytes(bb, length);
-    }
-
     public int compare(ByteBuffer o1, ByteBuffer o2)
     {
-        if (o1 == null)
-            return o2 == null ? 0 : -1;
+        if (o1 == null || !o1.hasRemaining())
+            return o2 == null || !o2.hasRemaining() ? 0 : -1;
+        if (o2 == null || !o2.hasRemaining())
+            return 1;
 
         ByteBuffer bb1 = o1.duplicate();
         ByteBuffer bb2 = o2.duplicate();
+
+        boolean isStatic1 = readIsStatic(bb1);
+        boolean isStatic2 = readIsStatic(bb2);
+        if (isStatic1 != isStatic2)
+            return isStatic1 ? -1 : 1;
+
         int i = 0;
 
         ByteBuffer previous = null;
@@ -79,8 +58,8 @@ public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
         {
             AbstractType<?> comparator = getComparator(i, bb1, bb2);
 
-            ByteBuffer value1 = getWithShortLength(bb1);
-            ByteBuffer value2 = getWithShortLength(bb2);
+            ByteBuffer value1 = ByteBufferUtil.readBytesWithShortLength(bb1);
+            ByteBuffer value2 = ByteBufferUtil.readBytesWithShortLength(bb2);
 
             int cmp = comparator.compareCollectionMembers(value1, value2, previous);
             if (cmp != 0)
@@ -90,22 +69,9 @@ public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
 
             byte b1 = bb1.get();
             byte b2 = bb2.get();
-            if (b1 < 0)
-            {
-                if (b2 >= 0)
-                    return -1;
-            }
-            else if (b1 > 0)
-            {
-                if (b2 <= 0)
-                    return 1;
-            }
-            else
-            {
-                // b1 == 0
-                if (b2 != 0)
-                    return -b2;
-            }
+            if (b1 != b2)
+                return b1 - b2;
+
             ++i;
         }
 
@@ -116,6 +82,10 @@ public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
         return 1;
     }
 
+    // Check if the provided BB represents a static name and advance the
+    // buffer to the real beginning if so.
+    protected abstract boolean readIsStatic(ByteBuffer bb);
+
     /**
      * Split a composite column names into it's components.
      */
@@ -123,11 +93,12 @@ public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
     {
         List<ByteBuffer> l = new ArrayList<ByteBuffer>();
         ByteBuffer bb = name.duplicate();
+        readIsStatic(bb);
         int i = 0;
         while (bb.remaining() > 0)
         {
             getComparator(i++, bb);
-            l.add(getWithShortLength(bb));
+            l.add(ByteBufferUtil.readBytesWithShortLength(bb));
             bb.get(); // skip end-of-component
         }
         return l.toArray(new ByteBuffer[l.size()]);
@@ -150,12 +121,13 @@ public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
         List<CompositeComponent> list = new ArrayList<CompositeComponent>();
 
         ByteBuffer bb = bytes.duplicate();
+        readIsStatic(bb);
         int i = 0;
 
         while (bb.remaining() > 0)
         {
             AbstractType comparator = getComparator(i, bb);
-            ByteBuffer value = getWithShortLength(bb);
+            ByteBuffer value = ByteBufferUtil.readBytesWithShortLength(bb);
 
             list.add( new CompositeComponent(comparator,value) );
 
@@ -219,15 +191,16 @@ public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
     {
         StringBuilder sb = new StringBuilder();
         ByteBuffer bb = bytes.duplicate();
-        int i = 0;
+        readIsStatic(bb);
 
+        int i = 0;
         while (bb.remaining() > 0)
         {
             if (bb.remaining() != bytes.remaining())
                 sb.append(":");
 
             AbstractType<?> comparator = getAndAppendComparator(i, bb, sb);
-            ByteBuffer value = getWithShortLength(bb);
+            ByteBuffer value = ByteBufferUtil.readBytesWithShortLength(bb);
 
             sb.append(escape(comparator.getString(value)));
 
@@ -280,7 +253,7 @@ public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
         for (ByteBuffer component : components)
         {
             comparators.get(i).serializeComparator(bb);
-            putShortLength(bb, component.remaining());
+            ByteBufferUtil.writeShortLength(bb, component.remaining());
             bb.put(component); // it's ok to consume component as we won't use it anymore
             bb.put((byte)0);
             ++i;
@@ -298,6 +271,7 @@ public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
     public void validate(ByteBuffer bytes) throws MarshalException
     {
         ByteBuffer bb = bytes.duplicate();
+        readIsStatic(bb);
 
         int i = 0;
         ByteBuffer previous = null;
@@ -307,11 +281,11 @@ public abstract class AbstractCompositeType extends AbstractType<ByteBuffer>
 
             if (bb.remaining() < 2)
                 throw new MarshalException("Not enough bytes to read value size of component " + i);
-            int length = getShortLength(bb);
+            int length = ByteBufferUtil.readShortLength(bb);
 
             if (bb.remaining() < length)
                 throw new MarshalException("Not enough bytes to read value of component " + i);
-            ByteBuffer value = getBytes(bb, length);
+            ByteBuffer value = ByteBufferUtil.readBytes(bb, length);
 
             comparator.validateCollectionMember(value, previous);
 

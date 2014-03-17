@@ -33,15 +33,14 @@ public class CqlInserter extends CqlOperation<Integer>
     public CqlInserter(State state, long idx)
     {
         super(state, idx);
+        if (state.settings.columns.useTimeUUIDComparator)
+            throw new IllegalStateException("Cannot use TimeUUID Comparator with CQL");
     }
 
     @Override
     protected String buildQuery()
     {
-        StringBuilder query = new StringBuilder("UPDATE ").append(wrapInQuotesIfRequired(state.settings.schema.columnFamily));
-
-        if (state.isCql2())
-            query.append(" USING CONSISTENCY ").append(state.settings.command.consistencyLevel);
+        StringBuilder query = new StringBuilder("UPDATE ").append(wrapInQuotes(state.type.table));
 
         query.append(" SET ");
 
@@ -55,12 +54,12 @@ public class CqlInserter extends CqlOperation<Integer>
                 if (state.isCql3())
                     throw new UnsupportedOperationException("Cannot use UUIDs in column names with CQL3");
 
-                query.append(wrapInQuotesIfRequired(UUIDGen.getTimeUUID().toString()))
+                query.append(wrapInQuotes(UUIDGen.getTimeUUID().toString()))
                         .append(" = ?");
             }
             else
             {
-                query.append(wrapInQuotesIfRequired("C" + i)).append(" = ?");
+                query.append(wrapInQuotes("C" + i)).append(" = ?");
             }
         }
 
@@ -69,17 +68,17 @@ public class CqlInserter extends CqlOperation<Integer>
     }
 
     @Override
-    protected List<ByteBuffer> getQueryParameters(byte[] key)
+    protected List<Object> getQueryParameters(byte[] key)
     {
-        final ArrayList<ByteBuffer> queryParams = new ArrayList<>();
-        final List<ByteBuffer> values = generateColumnValues();
+        final ArrayList<Object> queryParams = new ArrayList<>();
+        final List<ByteBuffer> values = generateColumnValues(ByteBuffer.wrap(key));
         queryParams.addAll(values);
         queryParams.add(ByteBuffer.wrap(key));
         return queryParams;
     }
 
     @Override
-    protected CqlRunOp<Integer> buildRunOp(ClientWrapper client, String query, Object queryId, List<ByteBuffer> params, String keyid, ByteBuffer key)
+    protected CqlRunOp<Integer> buildRunOp(ClientWrapper client, String query, Object queryId, List<Object> params, String keyid, ByteBuffer key)
     {
         return new CqlRunOpAlwaysSucceed(client, query, queryId, params, keyid, key, 1);
     }

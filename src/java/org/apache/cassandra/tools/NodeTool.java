@@ -17,31 +17,34 @@
  */
 package org.apache.cassandra.tools;
 
-import java.io.File;
-import java.io.FileWriter;
-import java.io.IOException;
+import java.io.*;
 import java.lang.management.MemoryUsage;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.text.DecimalFormat;
 import java.text.SimpleDateFormat;
 import java.util.*;
+import java.util.Map.Entry;
 import java.util.concurrent.ExecutionException;
+
 import javax.management.openmbean.TabularData;
 
 import com.google.common.base.Joiner;
 import com.google.common.base.Throwables;
+import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.LinkedHashMultimap;
 import com.google.common.collect.Maps;
-
 import com.yammer.metrics.reporting.JmxReporter;
+
 import io.airlift.command.*;
+
 import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutorMBean;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStoreMBean;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.compaction.CompactionManagerMBean;
 import org.apache.cassandra.db.compaction.OperationType;
+import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.locator.EndpointSnitchInfoMBean;
 import org.apache.cassandra.net.MessagingServiceMBean;
 import org.apache.cassandra.service.CacheServiceMBean;
@@ -59,8 +62,7 @@ import static com.google.common.collect.Lists.newArrayList;
 import static java.lang.Integer.parseInt;
 import static java.lang.String.format;
 import static org.apache.commons.lang3.ArrayUtils.EMPTY_STRING_ARRAY;
-import static org.apache.commons.lang3.StringUtils.EMPTY;
-import static org.apache.commons.lang3.StringUtils.join;
+import static org.apache.commons.lang3.StringUtils.*;
 
 public class NodeTool
 {
@@ -101,6 +103,7 @@ public class NodeTool
                 GossipInfo.class,
                 InvalidateKeyCache.class,
                 InvalidateRowCache.class,
+                InvalidateCounterCache.class,
                 Join.class,
                 Move.class,
                 PauseHandoff.class,
@@ -117,6 +120,7 @@ public class NodeTool
                 SetStreamThroughput.class,
                 SetTraceProbability.class,
                 Snapshot.class,
+                ListSnapshots.class,
                 Status.class,
                 StatusBinary.class,
                 StatusThrift.class,
@@ -135,7 +139,8 @@ public class NodeTool
                 DisableHandoff.class,
                 Drain.class,
                 TruncateHints.class,
-                TpStats.class
+                TpStats.class,
+                TakeToken.class
         );
 
         Cli<Runnable> parser = Cli.<Runnable>builder("nodetool")
@@ -219,17 +224,67 @@ public class NodeTool
         @Option(type = OptionType.GLOBAL, name = {"-pw", "--password"}, description = "Remote jmx agent password")
         private String password = EMPTY;
 
+        @Option(type = OptionType.GLOBAL, name = {"-pwf", "--password-file"}, description = "Path to the JMX password file")
+        private String passwordFilePath = EMPTY;
+
         @Override
         public void run()
         {
+            if (isNotEmpty(username)) {
+                if (isNotEmpty(passwordFilePath))
+                    password = readUserPasswordFromFile(username, passwordFilePath);
+
+                if (isEmpty(password))
+                    password = promptAndReadPassword();
+            }
+
             try (NodeProbe probe = connect())
             {
                 execute(probe);
-            } catch (IOException e)
+            } 
+            catch (IOException e)
             {
                 throw new RuntimeException("Error while closing JMX connection", e);
             }
 
+        }
+
+        private String readUserPasswordFromFile(String username, String passwordFilePath) {
+            String password = EMPTY;
+
+            File passwordFile = new File(passwordFilePath);
+            try (Scanner scanner = new Scanner(passwordFile).useDelimiter("\\s+"))
+            {
+                while (scanner.hasNextLine())
+                {
+                    if (scanner.hasNext())
+                    {
+                        String jmxRole = scanner.next();
+                        if (jmxRole.equals(username) && scanner.hasNext())
+                        {
+                            password = scanner.next();
+                            break;
+                        }
+                    }
+                    scanner.nextLine();
+                }
+            } catch (FileNotFoundException e)
+            {
+                throw new RuntimeException(e);
+            }
+
+            return password;
+        }
+
+        private String promptAndReadPassword()
+        {
+            String password = EMPTY;
+
+            Console console = System.console();
+            if (console != null)
+                password = String.valueOf(console.readPassword("Password:"));
+
+            return password;
         }
 
         protected abstract void execute(NodeProbe probe);
@@ -340,6 +395,17 @@ public class NodeTool
                     probe.getCacheMetric("RowCache", "HitRate"),
                     cacheService.getRowCacheSavePeriodInSeconds());
 
+            // Counter Cache: Hits, Requests, RecentHitRate, SavePeriodInSeconds
+            System.out.printf("%-17s: entries %d, size %d (bytes), capacity %d (bytes), %d hits, %d requests, %.3f recent hit rate, %d save period in seconds%n",
+                    "Counter Cache",
+                    probe.getCacheMetric("CounterCache", "Entries"),
+                    probe.getCacheMetric("CounterCache", "Size"),
+                    probe.getCacheMetric("CounterCache", "Capacity"),
+                    probe.getCacheMetric("CounterCache", "Hits"),
+                    probe.getCacheMetric("CounterCache", "Requests"),
+                    probe.getCacheMetric("CounterCache", "HitRate"),
+                    cacheService.getCounterCacheSavePeriodInSeconds());
+
             // Tokens
             List<String> tokens = probe.getTokens();
             if (tokens.size() == 1 || this.tokens)
@@ -386,24 +452,9 @@ public class NodeTool
                 ownerships = probe.getOwnership();
                 System.out.printf("Note: Ownership information does not include topology; for complete information, specify a keyspace%n");
             }
-            try
-            {
-                System.out.println();
-                Map<String, Map<InetAddress, Float>> perDcOwnerships = Maps.newLinkedHashMap();
-                // get the different datasets and map to tokens
-                for (Map.Entry<InetAddress, Float> ownership : ownerships.entrySet())
-                {
-                    String dc = probe.getEndpointSnitchInfoProxy().getDatacenter(ownership.getKey().getHostAddress());
-                    if (!perDcOwnerships.containsKey(dc))
-                        perDcOwnerships.put(dc, new LinkedHashMap<InetAddress, Float>());
-                    perDcOwnerships.get(dc).put(ownership.getKey(), ownership.getValue());
-                }
-                for (Map.Entry<String, Map<InetAddress, Float>> entry : perDcOwnerships.entrySet())
-                    printDc(probe, format, entry.getKey(), endpointsToTokens, entry.getValue());
-            } catch (UnknownHostException e)
-            {
-                throw new RuntimeException(e);
-            }
+            System.out.println();
+            for (Entry<String, SetHostStat> entry : getOwnershipByDc(probe, false, tokensToEndpoints, ownerships).entrySet())
+                printDc(probe, format, entry.getKey(), endpointsToTokens, entry.getValue());
 
             if (DatabaseDescriptor.getNumTokens() > 1)
             {
@@ -415,7 +466,7 @@ public class NodeTool
         private void printDc(NodeProbe probe, String format,
                              String dc,
                              LinkedHashMultimap<String, String> endpointsToTokens,
-                             Map<InetAddress, Float> filteredOwnerships)
+                             SetHostStat hoststats)
         {
             Collection<String> liveNodes = probe.getLiveNodes();
             Collection<String> deadNodes = probe.getUnreachableNodes();
@@ -431,55 +482,52 @@ public class NodeTool
             List<String> tokens = new ArrayList<>();
             String lastToken = "";
 
-            for (Map.Entry<InetAddress, Float> entry : filteredOwnerships.entrySet())
+            for (HostStat stat : hoststats)
             {
-                tokens.addAll(endpointsToTokens.get(entry.getKey().getHostAddress()));
+                tokens.addAll(endpointsToTokens.get(stat.ip));
                 lastToken = tokens.get(tokens.size() - 1);
             }
 
-
             System.out.printf(format, "Address", "Rack", "Status", "State", "Load", "Owns", "Token");
 
-            if (filteredOwnerships.size() > 1)
+            if (hoststats.size() > 1)
                 System.out.printf(format, "", "", "", "", "", "", lastToken);
             else
                 System.out.println();
 
-            for (Map.Entry<InetAddress, Float> entry : filteredOwnerships.entrySet())
+            for (HostStat stat : hoststats)
             {
-                String endpoint = entry.getKey().getHostAddress();
-                for (String token : endpointsToTokens.get(endpoint))
+                String endpoint = stat.ip;
+                String rack;
+                try
                 {
-                    String rack;
-                    try
-                    {
-                        rack = probe.getEndpointSnitchInfoProxy().getRack(endpoint);
-                    } catch (UnknownHostException e)
-                    {
-                        rack = "Unknown";
-                    }
-
-                    String status = liveNodes.contains(endpoint)
-                                    ? "Up"
-                                    : deadNodes.contains(endpoint)
-                                      ? "Down"
-                                      : "?";
-
-                    String state = "Normal";
-
-                    if (joiningNodes.contains(endpoint))
-                        state = "Joining";
-                    else if (leavingNodes.contains(endpoint))
-                        state = "Leaving";
-                    else if (movingNodes.contains(endpoint))
-                        state = "Moving";
-
-                    String load = loadMap.containsKey(endpoint)
-                                  ? loadMap.get(endpoint)
-                                  : "?";
-                    String owns = new DecimalFormat("##0.00%").format(entry.getValue());
-                    System.out.printf(format, endpoint, rack, status, state, load, owns, token);
+                    rack = probe.getEndpointSnitchInfoProxy().getRack(endpoint);
                 }
+                catch (UnknownHostException e)
+                {
+                    rack = "Unknown";
+                }
+
+                String status = liveNodes.contains(endpoint)
+                        ? "Up"
+                        : deadNodes.contains(endpoint)
+                                ? "Down"
+                                : "?";
+
+                String state = "Normal";
+
+                if (joiningNodes.contains(endpoint))
+                    state = "Joining";
+                else if (leavingNodes.contains(endpoint))
+                    state = "Leaving";
+                else if (movingNodes.contains(endpoint))
+                    state = "Moving";
+
+                String load = loadMap.containsKey(endpoint)
+                        ? loadMap.get(endpoint)
+                        : "?";
+                String owns = stat.owns != null ? new DecimalFormat("##0.00%").format(stat.owns) : "?";
+                System.out.printf(format, endpoint, rack, status, state, load, owns, stat.token);
             }
             System.out.println();
         }
@@ -595,7 +643,7 @@ public class NodeTool
                 List<ColumnFamilyStoreMBean> columnFamilies = entry.getValue();
                 long keyspaceReadCount = 0;
                 long keyspaceWriteCount = 0;
-                int keyspacePendingTasks = 0;
+                int keyspacePendingFlushes = 0;
                 double keyspaceTotalReadTime = 0.0f;
                 double keyspaceTotalWriteTime = 0.0f;
 
@@ -616,7 +664,7 @@ public class NodeTool
                         keyspaceWriteCount += writeCount;
                         keyspaceTotalWriteTime += (long) probe.getColumnFamilyMetric(keyspaceName, cfName, "WriteTotalLatency");
                     }
-                    keyspacePendingTasks += (int) probe.getColumnFamilyMetric(keyspaceName, cfName, "PendingTasks");
+                    keyspacePendingFlushes += (long) probe.getColumnFamilyMetric(keyspaceName, cfName, "PendingFlushes");
                 }
 
                 double keyspaceReadLatency = keyspaceReadCount > 0
@@ -630,7 +678,7 @@ public class NodeTool
                 System.out.println("\tRead Latency: " + format("%s", keyspaceReadLatency) + " ms.");
                 System.out.println("\tWrite Count: " + keyspaceWriteCount);
                 System.out.println("\tWrite Latency: " + format("%s", keyspaceWriteLatency) + " ms.");
-                System.out.println("\tPending Tasks: " + keyspacePendingTasks);
+                System.out.println("\tPending Flushes: " + keyspacePendingFlushes);
 
                 // print out column family statistics for this keyspace
                 for (ColumnFamilyStoreMBean cfstore : columnFamilies)
@@ -669,7 +717,7 @@ public class NodeTool
                     System.out.println("\t\tSpace used by snapshots (total), bytes: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "SnapshotsSize"));
                     System.out.println("\t\tSSTable Compression Ratio: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "CompressionRatio"));
                     System.out.println("\t\tMemtable cell count: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "MemtableColumnsCount"));
-                    System.out.println("\t\tMemtable data size, bytes: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "MemtableDataSize"));
+                    System.out.println("\t\tMemtable data size, bytes: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "MemtableLiveDataSize"));
                     System.out.println("\t\tMemtable switch count: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "MemtableSwitchCount"));
                     System.out.println("\t\tLocal read count: " + ((JmxReporter.TimerMBean) probe.getColumnFamilyMetric(keyspaceName, cfName, "ReadLatency")).getCount());
                     double localReadLatency = ((JmxReporter.TimerMBean) probe.getColumnFamilyMetric(keyspaceName, cfName, "ReadLatency")).getMean() / 1000;
@@ -679,7 +727,7 @@ public class NodeTool
                     double localWriteLatency = ((JmxReporter.TimerMBean) probe.getColumnFamilyMetric(keyspaceName, cfName, "WriteLatency")).getMean() / 1000;
                     double localWLatency = localWriteLatency > 0 ? localWriteLatency : Double.NaN;
                     System.out.printf("\t\tLocal write latency: %01.3f ms%n", localWLatency);
-                    System.out.println("\t\tPending tasks: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "PendingTasks"));
+                    System.out.println("\t\tPending flushes: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "PendingFlushes"));
                     System.out.println("\t\tBloom filter false positives: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "BloomFilterFalsePositives"));
                     System.out.println("\t\tBloom filter false ratio: " + format("%01.5f", probe.getColumnFamilyMetric(keyspaceName, cfName, "RecentBloomFilterFalseRatio")));
                     System.out.println("\t\tBloom filter space used, bytes: " + probe.getColumnFamilyMetric(keyspaceName, cfName, "BloomFilterDiskSpaceUsed"));
@@ -957,8 +1005,15 @@ public class NodeTool
         @Arguments(usage = "[<keyspace> <cfnames>...]", description = "The keyspace followed by one or many column families")
         private List<String> args = new ArrayList<>();
 
-        @Option(title = "disable_snapshot", name = {"-ns", "--no-snapshot"}, description = "Scrubbed CFs will be snapshotted first, if disableSnapshot is false. (default false)")
+        @Option(title = "disable_snapshot",
+                name = {"-ns", "--no-snapshot"},
+                description = "Scrubbed CFs will be snapshotted first, if disableSnapshot is false. (default false)")
         private boolean disableSnapshot = false;
+
+        @Option(title = "skip_corrupted",
+                name = {"-s", "--skip-corrupted"},
+                description = "Skip corrupted partitions even when scrubbing counter tables. (default false)")
+        private boolean skipCorrupted = false;
 
         @Override
         public void execute(NodeProbe probe)
@@ -970,7 +1025,7 @@ public class NodeTool
             {
                 try
                 {
-                    probe.scrub(disableSnapshot, keyspace, cfnames);
+                    probe.scrub(disableSnapshot, skipCorrupted, keyspace, cfnames);
                 } catch (Exception e)
                 {
                     throw new RuntimeException("Error occurred during flushing", e);
@@ -1106,7 +1161,7 @@ public class NodeTool
 
             String format = "%-41s%-19s%-29s%-26s%-15s%-15s%s%n";
             List<String> indexNames = tabularData.getTabularType().getIndexNames();
-            System.out.printf(format, toArray(indexNames, String.class));
+            System.out.printf(format, toArray(indexNames, Object.class));
 
             Set<?> values = tabularData.keySet();
             for (Object eachValue : values)
@@ -1198,10 +1253,17 @@ public class NodeTool
     @Command(name = "enablehandoff", description = "Reenable the future hints storing on the current node")
     public static class EnableHandoff extends NodeToolCmd
     {
+        @Arguments(usage = "<dc-name>,<dc-name>", description = "Enable hinted handoff only for these DCs")
+        private List<String> args = new ArrayList<>();
+
         @Override
         public void execute(NodeProbe probe)
         {
-            probe.enableHintedHandoff();
+            checkArgument(args.size() <= 1, "enablehandoff does not accept two args");
+            if(args.size() == 1)
+                probe.enableHintedHandoff(args.get(0));
+            else
+                probe.enableHintedHandoff();
         }
     }
 
@@ -1329,6 +1391,36 @@ public class NodeTool
         }
     }
 
+    @Command(name = "invalidatecountercache", description = "Invalidate the counter cache")
+    public static class InvalidateCounterCache extends NodeToolCmd
+    {
+        @Override
+        public void execute(NodeProbe probe)
+        {
+            probe.invalidateCounterCache();
+        }
+    }
+
+    @Command(name = "taketoken", description = "Move the token(s) from the existing owner(s) to this node.  For vnodes only.  Use \\\\ to escape negative tokens.")
+    public static class TakeToken extends NodeToolCmd
+    {
+        @Arguments(usage = "<token, ...>", description = "Token(s) to take", required = true)
+        private List<String> tokens = new ArrayList<String>();
+
+        @Override
+        public void execute(NodeProbe probe)
+        {
+            try
+            {
+                probe.takeTokens(tokens);
+            }
+            catch (IOException e)
+            {
+                throw new RuntimeException("Error taking tokens", e);
+            }
+        }
+    }
+
     @Command(name = "join", description = "Join the ring")
     public static class Join extends NodeToolCmd
     {
@@ -1365,6 +1457,8 @@ public class NodeTool
             }
         }
     }
+
+
 
     @Command(name = "pausehandoff", description = "Pause hints delivery process")
     public static class PauseHandoff extends NodeToolCmd
@@ -1456,7 +1550,7 @@ public class NodeTool
     @Command(name = "removenode", description = "Show status of current node removal, force completion of pending removal or remove provided ID")
     public static class RemoveNode extends NodeToolCmd
     {
-        @Arguments(title = "remove_operation", usage = "<status>|<force>|<ID>", description = "The keyspace and column family name", required = true)
+        @Arguments(title = "remove_operation", usage = "<status>|<force>|<ID>", description = "Show status of current node removal, force completion of pending removal, or remove provided ID", required = true)
         private String removeOperation = EMPTY;
 
         @Override
@@ -1493,6 +1587,9 @@ public class NodeTool
         @Option(title = "specific_dc", name = {"-dc", "--in-dc"}, description = "Use -dc to repair specific datacenters")
         private List<String> specificDataCenters = new ArrayList<>();
 
+        @Option(title = "specific_host", name = {"-hosts", "--in-hosts"}, description = "Use -hosts to repair specific hosts")
+        private List<String> specificHosts = new ArrayList<>();
+
         @Option(title = "start_token", name = {"-st", "--start-token"}, description = "Use -st to specify a token at which the repair range starts")
         private String startToken = EMPTY;
 
@@ -1501,6 +1598,9 @@ public class NodeTool
 
         @Option(title = "primary_range", name = {"-pr", "--partitioner-range"}, description = "Use -pr to repair only the first range returned by the partitioner")
         private boolean primaryRange = false;
+
+        @Option(title = "incremental_repair", name = {"-inc", "--incremental"}, description = "Use -inc to use the new incremental repair")
+        private boolean incrementalRepair = false;
 
         @Override
         public void execute(NodeProbe probe)
@@ -1513,15 +1613,17 @@ public class NodeTool
                 try
                 {
                     Collection<String> dataCenters = null;
+                    Collection<String> hosts = null;
                     if (!specificDataCenters.isEmpty())
                         dataCenters = newArrayList(specificDataCenters);
                     else if (localDC)
                         dataCenters = newArrayList(probe.getDataCenter());
-
+                    else if(!specificHosts.isEmpty())
+                        hosts = newArrayList(specificHosts);
                     if (!startToken.isEmpty() || !endToken.isEmpty())
-                        probe.forceRepairRangeAsync(System.out, keyspace, !parallel, dataCenters, startToken, endToken);
+                        probe.forceRepairRangeAsync(System.out, keyspace, !parallel, dataCenters,hosts, startToken, endToken, !incrementalRepair);
                     else
-                        probe.forceRepairAsync(System.out, keyspace, !parallel, dataCenters, primaryRange, cfnames);
+                        probe.forceRepairAsync(System.out, keyspace, !parallel, dataCenters, hosts, primaryRange, !incrementalRepair, cfnames);
                 } catch (Exception e)
                 {
                     throw new RuntimeException("Error occurred during repair", e);
@@ -1530,17 +1632,20 @@ public class NodeTool
         }
     }
 
-    @Command(name = "setcachecapacity", description = "Set global key and row cache capacities (in MB units)")
+    @Command(name = "setcachecapacity", description = "Set global key, row, and counter cache capacities (in MB units)")
     public static class SetCacheCapacity extends NodeToolCmd
     {
-        @Arguments(title = "<key-cache-capacity> <row-cache-capacity>", usage = "<key-cache-capacity> <row-cache-capacity>", description = "Key cache and row cache (in MB)", required = true)
+        @Arguments(title = "<key-cache-capacity> <row-cache-capacity> <counter-cache-capacity>",
+                   usage = "<key-cache-capacity> <row-cache-capacity> <counter-cache-capacity>",
+                   description = "Key cache, row cache, and counter cache (in MB)",
+                   required = true)
         private List<Integer> args = new ArrayList<>();
 
         @Override
         public void execute(NodeProbe probe)
         {
-            checkArgument(args.size() == 2, "setcachecapacity requires key-cache-capacity, and row-cache-capacity args.");
-            probe.setCacheCapacities(args.get(0), args.get(1));
+            checkArgument(args.size() == 3, "setcachecapacity requires key-cache-capacity, row-cache-capacity, and counter-cache-capacity args.");
+            probe.setCacheCapacities(args.get(0), args.get(1), args.get(2));
         }
     }
 
@@ -1645,6 +1750,48 @@ public class NodeTool
         }
     }
 
+    @Command(name = "listsnapshots", description = "Lists all the snapshots along with the size on disk and true size.")
+    public static class ListSnapshots extends NodeToolCmd
+    {
+        @Override
+        public void execute(NodeProbe probe)
+        {
+            try
+            {
+                System.out.println("Snapshot Details: ");
+
+                final Map<String,TabularData> snapshotDetails = probe.getSnapshotDetails();
+                if (snapshotDetails.isEmpty())
+                {
+                    System.out.printf("There are no snapshots");
+                    return;
+                }
+
+                final long trueSnapshotsSize = probe.trueSnapshotsSize();
+                final String format = "%-20s%-29s%-29s%-19s%-19s%n";
+                // display column names only once
+                final List<String> indexNames = snapshotDetails.entrySet().iterator().next().getValue().getTabularType().getIndexNames();
+                System.out.printf(format, (Object[]) indexNames.toArray(new String[indexNames.size()]));
+
+                for (final Map.Entry<String, TabularData> snapshotDetail : snapshotDetails.entrySet())
+                {
+                    Set<?> values = snapshotDetail.getValue().keySet();
+                    for (Object eachValue : values)
+                    {
+                        final List<?> value = (List<?>) eachValue;
+                        System.out.printf(format, value.toArray(new Object[value.size()]));
+                    }
+                }
+
+                System.out.println("\nTotal TrueDiskSpaceUsed: " + FileUtils.stringifyFileSize(trueSnapshotsSize) + "\n");
+            }
+            catch (Exception e)
+            {
+                throw new RuntimeException("Error during list snapshot", e);
+            }
+        }
+    }
+
     @Command(name = "status", description = "Print cluster information (state, load, IDs, ...)")
     public static class Status extends NodeToolCmd
     {
@@ -1675,21 +1822,21 @@ public class NodeTool
             hostIDMap = probe.getHostIdMap();
             epSnitchInfo = probe.getEndpointSnitchInfoProxy();
 
-            SetHostStat ownerships;
+            Map<InetAddress, Float> ownerships;
             try
             {
-                ownerships = new SetHostStat(probe.effectiveOwnership(keyspace));
+                ownerships = probe.effectiveOwnership(keyspace);
                 hasEffectiveOwns = true;
             } catch (IllegalStateException e)
             {
-                ownerships = new SetHostStat(probe.getOwnership());
+                ownerships = probe.getOwnership();
             }
 
             // More tokens then nodes (aka vnodes)?
-            if (new HashSet<>(tokensToEndpoints.values()).size() < tokensToEndpoints.keySet().size())
+            if (tokensToEndpoints.values().size() < tokensToEndpoints.keySet().size())
                 isTokenPerNode = false;
 
-            Map<String, SetHostStat> dcs = getOwnershipByDc(probe, ownerships);
+            Map<String, SetHostStat> dcs = getOwnershipByDc(probe, resolveIp, tokensToEndpoints, ownerships);
 
             findMaxAddressLength(dcs);
 
@@ -1707,9 +1854,23 @@ public class NodeTool
 
                 printNodesHeader(hasEffectiveOwns, isTokenPerNode);
 
-                // Nodes
-                for (HostStat entry : dc.getValue())
-                    printNode(probe, entry, hasEffectiveOwns, isTokenPerNode);
+                ArrayListMultimap<String, String> hostToTokens = ArrayListMultimap.create();
+                for (HostStat stat : dc.getValue())
+                    hostToTokens.put(stat.ipOrDns(), stat.token);
+
+                try
+                {
+                    for (String endpoint : hostToTokens.keySet())
+                    {
+                        Float owns = ownerships.get(InetAddress.getByName(endpoint));
+                        List<String> tokens = hostToTokens.get(endpoint);
+                        printNode(endpoint, owns, tokens, hasEffectiveOwns, isTokenPerNode);
+                    }
+                }
+                catch (UnknownHostException e)
+                {
+                    throw new RuntimeException(e);
+                }
             }
 
         }
@@ -1737,11 +1898,10 @@ public class NodeTool
                 System.out.printf(fmt, "-", "-", "Address", "Load", "Tokens", owns, "Host ID", "Rack");
         }
 
-        private void printNode(NodeProbe probe, HostStat hostStat, boolean hasEffectiveOwns, boolean isTokenPerNode)
+        private void printNode(String endpoint, Float owns, List<String> tokens, boolean hasEffectiveOwns, boolean isTokenPerNode)
         {
             String status, state, load, strOwns, hostID, rack, fmt;
             fmt = getFormat(hasEffectiveOwns, isTokenPerNode);
-            String endpoint = hostStat.ip;
             if (liveNodes.contains(endpoint)) status = "U";
             else if (unreachableNodes.contains(endpoint)) status = "D";
             else status = "?";
@@ -1751,7 +1911,7 @@ public class NodeTool
             else state = "N";
 
             load = loadMap.containsKey(endpoint) ? loadMap.get(endpoint) : "?";
-            strOwns = new DecimalFormat("##0.0%").format(hostStat.owns);
+            strOwns = owns != null ? new DecimalFormat("##0.0%").format(owns) : "?";
             hostID = hostIDMap.get(endpoint);
 
             try
@@ -1763,13 +1923,9 @@ public class NodeTool
             }
 
             if (isTokenPerNode)
-            {
-                System.out.printf(fmt, status, state, hostStat.ipOrDns(), load, strOwns, hostID, probe.getTokens(endpoint).get(0), rack);
-            } else
-            {
-                int tokens = probe.getTokens(endpoint).size();
-                System.out.printf(fmt, status, state, hostStat.ipOrDns(), load, tokens, strOwns, hostID, rack);
-            }
+                System.out.printf(fmt, status, state, endpoint, load, strOwns, hostID, tokens.get(0), rack);
+            else
+                System.out.printf(fmt, status, state, endpoint, load, tokens.size(), strOwns, hostID, rack);
         }
 
         private String getFormat(
@@ -1799,81 +1955,80 @@ public class NodeTool
 
             return format;
         }
+    }
 
-        private Map<String, SetHostStat> getOwnershipByDc(NodeProbe probe, SetHostStat ownerships)
+    private static Map<String, SetHostStat> getOwnershipByDc(NodeProbe probe, boolean resolveIp, 
+                                                             Map<String, String> tokenToEndpoint,
+                                                             Map<InetAddress, Float> ownerships)
+    {
+        Map<String, SetHostStat> ownershipByDc = Maps.newLinkedHashMap();
+        EndpointSnitchInfoMBean epSnitchInfo = probe.getEndpointSnitchInfoProxy();
+        try
         {
-            Map<String, SetHostStat> ownershipByDc = Maps.newLinkedHashMap();
-            EndpointSnitchInfoMBean epSnitchInfo = probe.getEndpointSnitchInfoProxy();
-
-            try
+            for (Entry<String, String> tokenAndEndPoint : tokenToEndpoint.entrySet())
             {
-                for (HostStat ownership : ownerships)
-                {
-                    String dc = epSnitchInfo.getDatacenter(ownership.ip);
-                    if (!ownershipByDc.containsKey(dc))
-                        ownershipByDc.put(dc, new SetHostStat());
-                    ownershipByDc.get(dc).add(ownership);
-                }
-            } catch (UnknownHostException e)
-            {
-                throw new RuntimeException(e);
-            }
-
-            return ownershipByDc;
-        }
-
-        class SetHostStat implements Iterable<HostStat>
-        {
-            final List<HostStat> hostStats = new ArrayList<>();
-
-            public SetHostStat()
-            {
-            }
-
-            public SetHostStat(Map<InetAddress, Float> ownerships)
-            {
-                for (Map.Entry<InetAddress, Float> entry : ownerships.entrySet())
-                {
-                    hostStats.add(new HostStat(entry));
-                }
-            }
-
-            @Override
-            public Iterator<HostStat> iterator()
-            {
-                return hostStats.iterator();
-            }
-
-            public void add(HostStat entry)
-            {
-                hostStats.add(entry);
+                String dc = epSnitchInfo.getDatacenter(tokenAndEndPoint.getValue());
+                if (!ownershipByDc.containsKey(dc))
+                    ownershipByDc.put(dc, new SetHostStat(resolveIp));
+                ownershipByDc.get(dc).add(tokenAndEndPoint.getKey(), tokenAndEndPoint.getValue(), ownerships);
             }
         }
-
-        class HostStat
+        catch (UnknownHostException e)
         {
-            public final String ip;
-            public final String dns;
-            public final Float owns;
+            throw new RuntimeException(e);
+        }
+        return ownershipByDc;
+    }
 
-            public HostStat(Map.Entry<InetAddress, Float> ownership)
-            {
-                this.ip = ownership.getKey().getHostAddress();
-                this.dns = ownership.getKey().getHostName();
-                this.owns = ownership.getValue();
-            }
+    static class SetHostStat implements Iterable<HostStat>
+    {
+        final List<HostStat> hostStats = new ArrayList<HostStat>();
+        final boolean resolveIp;
 
-            public String ipOrDns()
-            {
-                if (resolveIp)
-                {
-                    return dns;
-                }
-                return ip;
-            }
+        public SetHostStat(boolean resolveIp)
+        {
+            this.resolveIp = resolveIp;
+        }
+
+        public int size()
+        {
+            return hostStats.size();
+        }
+
+        @Override
+        public Iterator<HostStat> iterator()
+        {
+            return hostStats.iterator();
+        }
+
+        public void add(String token, String host, Map<InetAddress, Float> ownerships) throws UnknownHostException
+        {
+            InetAddress endpoint = InetAddress.getByName(host);
+            Float owns = ownerships.get(endpoint);
+            hostStats.add(new HostStat(token, endpoint, resolveIp, owns));
         }
     }
 
+    static class HostStat
+    {
+        public final String ip;
+        public final String dns;
+        public final Float owns;
+        public final String token;
+
+        public HostStat(String token, InetAddress endPoint, boolean resolveIp, Float owns)
+        {
+            this.token = token;
+            this.ip = endPoint.getHostAddress();
+            this.dns = resolveIp ? endPoint.getHostName() : null;
+            this.owns = owns;
+        }
+
+        public String ipOrDns()
+        {
+            return (dns != null) ? dns : ip;
+        }
+    }
     @Command(name = "statusbinary", description = "Status of native transport (binary protocol)")
     public static class StatusBinary extends NodeToolCmd
     {
@@ -2039,14 +2194,17 @@ public class NodeTool
     @Command(name = "setcachekeystosave", description = "Set number of keys saved by each cache for faster post-restart warmup. 0 to disable")
     public static class SetCacheKeysToSave extends NodeToolCmd
     {
-        @Arguments(title = "<key-cache-keys-to-save> <row-cache-keys-to-save>", usage = "<key-cache-keys-to-save> <row-cache-keys-to-save>", description = "The number of keys saved by each cache. 0 to disable", required = true)
+        @Arguments(title = "<key-cache-keys-to-save> <row-cache-keys-to-save> <counter-cache-keys-to-save>",
+                   usage = "<key-cache-keys-to-save> <row-cache-keys-to-save> <counter-cache-keys-to-save>",
+                   description = "The number of keys saved by each cache. 0 to disable",
+                   required = true)
         private List<Integer> args = new ArrayList<>();
 
         @Override
         public void execute(NodeProbe probe)
         {
-            checkArgument(args.size() == 2, "setcachekeystosave requires key-cache-keys-to-save, and row-cache-keys-to-save args.");
-            probe.setCacheKeysToSave(args.get(0), args.get(1));
+            checkArgument(args.size() == 3, "setcachekeystosave requires key-cache-keys-to-save, row-cache-keys-to-save, and counter-cache-keys-to-save args.");
+            probe.setCacheKeysToSave(args.get(0), args.get(1), args.get(2));
         }
     }
 
@@ -2125,10 +2283,10 @@ public class NodeTool
         }
     }
 
-    @Command(name = "truncatehints", description = "Truncate all hints on the local node, or truncate hints for the endpoint specified.")
+    @Command(name = "truncatehints", description = "Truncate all hints on the local node, or truncate hints for the endpoint(s) specified.")
     public static class TruncateHints extends NodeToolCmd
     {
-        @Arguments(usage = "[endpoint]", description = "Endpoint address to delete hints for, either ip address (\"127.0.0.1\") or hostname")
+        @Arguments(usage = "[endpoint ... ]", description = "Endpoint address(es) to delete hints for, either ip address (\"127.0.0.1\") or hostname")
         private String endpoint = EMPTY;
 
         @Override

@@ -106,7 +106,6 @@ public class Server implements CassandraDaemon.Server
 	    if(!isRunning())
 	    {
                 run();
-                isRunning.set(true);
 	    }
     }
 
@@ -156,6 +155,7 @@ public class Server implements CassandraDaemon.Server
         logger.info("Starting listening for CQL clients on {}...", socket);
         Channel channel = bootstrap.bind(socket);
         connectionTracker.allChannels.add(channel);
+        isRunning.set(true);
     }
 
     private void registerMetrics()
@@ -281,7 +281,7 @@ public class Server implements CassandraDaemon.Server
             this.encryptionOptions = encryptionOptions;
             try
             {
-                this.sslContext = SSLFactory.createSSLContext(encryptionOptions, false);
+                this.sslContext = SSLFactory.createSSLContext(encryptionOptions, encryptionOptions.require_client_auth);
             }
             catch (IOException e)
             {
@@ -331,6 +331,8 @@ public class Server implements CassandraDaemon.Server
                 InetAddress rpcAddress = InetAddress.getByName(StorageService.instance.getRpcaddress(endpoint));
                 // If rpcAddress == 0.0.0.0 (i.e. bound on all addresses), returning that is not very helpful,
                 // so return the internal address (which is ok since "we're bound on all addresses").
+                // Note that after all nodes are running a version that includes CASSANDRA-5899, rpcAddress should
+                // never be 0.0.0.0, so this can eventually be removed.
                 return rpcAddress.equals(bindAll) ? endpoint : rpcAddress;
             }
             catch (UnknownHostException e)

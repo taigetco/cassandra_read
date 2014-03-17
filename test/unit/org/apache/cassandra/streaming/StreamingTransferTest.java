@@ -50,7 +50,7 @@ import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.CounterId;
 import org.apache.cassandra.utils.FBUtilities;
-import org.apache.cassandra.utils.HeapAllocator;
+import org.apache.cassandra.utils.memory.HeapAllocator;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.fail;
@@ -131,7 +131,7 @@ public class StreamingTransferTest extends SchemaLoader
     private List<String> createAndTransfer(ColumnFamilyStore cfs, Mutator mutator, boolean transferSSTables) throws Exception
     {
         // write a temporary SSTable, and unregister it
-        logger.debug("Mutating " + cfs.name);
+        logger.debug("Mutating {}", cfs.name);
         long timestamp = 1234;
         for (int i = 1; i <= 3; i++)
             mutator.mutate("key" + i, "col" + i, timestamp);
@@ -140,7 +140,7 @@ public class StreamingTransferTest extends SchemaLoader
         assertEquals(1, cfs.getSSTables().size());
 
         // transfer the first and last key
-        logger.debug("Transferring " + cfs.name);
+        logger.debug("Transferring {}", cfs.name);
         int[] offs;
         if (transferSSTables)
         {
@@ -179,7 +179,7 @@ public class StreamingTransferTest extends SchemaLoader
         for (int off : offs)
             keys.add("key" + off);
 
-        logger.debug("... everything looks good for " + cfs.name);
+        logger.debug("... everything looks good for {}", cfs.name);
         return keys;
     }
 
@@ -213,7 +213,7 @@ public class StreamingTransferTest extends SchemaLoader
         {
             details.add(new StreamSession.SSTableStreamingSections(sstable,
                                                                    sstable.getPositionsForRanges(ranges),
-                                                                   sstable.estimatedKeysForRanges(ranges)));
+                                                                   sstable.estimatedKeysForRanges(ranges), sstable.getSSTableMetadata().repairedAt));
         }
         return details;
     }
@@ -228,11 +228,11 @@ public class StreamingTransferTest extends SchemaLoader
             public void mutate(String key, String col, long timestamp) throws Exception
             {
                 long val = key.hashCode();
-                ColumnFamily cf = TreeMapBackedSortedColumns.factory.create(keyspace.getName(), cfs.name);
+                ColumnFamily cf = ArrayBackedSortedColumns.factory.create(keyspace.getName(), cfs.name);
                 cf.addColumn(column(col, "v", timestamp));
                 cf.addColumn(new Cell(cellname("birthdate"), ByteBufferUtil.bytes(val), timestamp));
                 Mutation rm = new Mutation("Keyspace1", ByteBufferUtil.bytes(key), cf);
-                logger.debug("Applying row to transfer " + rm);
+                logger.debug("Applying row to transfer {}", rm);
                 rm.apply();
             }
         }, transferSSTables);
@@ -314,8 +314,8 @@ public class StreamingTransferTest extends SchemaLoader
             public void mutate(String key, String col, long timestamp) throws Exception
             {
                 Map<String, ColumnFamily> entries = new HashMap<>();
-                ColumnFamily cf = TreeMapBackedSortedColumns.factory.create(cfs.metadata);
-                ColumnFamily cfCleaned = TreeMapBackedSortedColumns.factory.create(cfs.metadata);
+                ColumnFamily cf = ArrayBackedSortedColumns.factory.create(cfs.metadata);
+                ColumnFamily cfCleaned = ArrayBackedSortedColumns.factory.create(cfs.metadata);
                 CounterContext.ContextState state = CounterContext.ContextState.allocate(0, 1, 3, HeapAllocator.instance);
                 state.writeLocal(CounterId.fromInt(2), 9L, 3L);
                 state.writeRemote(CounterId.fromInt(4), 4L, 2L);
@@ -452,11 +452,11 @@ public class StreamingTransferTest extends SchemaLoader
         {
             public void mutate(String key, String colName, long timestamp) throws Exception
             {
-                ColumnFamily cf = TreeMapBackedSortedColumns.factory.create(keyspace.getName(), cfs.name);
+                ColumnFamily cf = ArrayBackedSortedColumns.factory.create(keyspace.getName(), cfs.name);
                 cf.addColumn(column(colName, "value", timestamp));
                 cf.addColumn(new Cell(cellname("birthdate"), ByteBufferUtil.bytes(new Date(timestamp).toString()), timestamp));
                 Mutation rm = new Mutation("Keyspace1", ByteBufferUtil.bytes(key), cf);
-                logger.debug("Applying row to transfer " + rm);
+                logger.debug("Applying row to transfer {}", rm);
                 rm.apply();
             }
         };

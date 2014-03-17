@@ -42,7 +42,7 @@ public final class ThriftInserter extends Operation
     public void run(final ThriftClient client) throws IOException
     {
         final ByteBuffer key = getKey();
-        final List<Column> columns = generateColumns();
+        final List<Column> columns = generateColumns(key);
 
         Map<String, List<Mutation>> row;
         if (!state.settings.columns.useSuperColumns)
@@ -53,7 +53,7 @@ public final class ThriftInserter extends Operation
                 ColumnOrSuperColumn column = new ColumnOrSuperColumn().setColumn(c);
                 mutations.add(new Mutation().setColumn_or_supercolumn(column));
             }
-            row = Collections.singletonMap(state.settings.schema.columnFamily, mutations);
+            row = Collections.singletonMap(state.type.table, mutations);
         }
         else
         {
@@ -64,7 +64,7 @@ public final class ThriftInserter extends Operation
                 final ColumnOrSuperColumn cosc = new ColumnOrSuperColumn().setSuper_column(s);
                 mutations.add(new Mutation().setColumn_or_supercolumn(cosc));
             }
-            row = Collections.singletonMap("Super1", mutations);
+            row = Collections.singletonMap(state.settings.command.type.supertable, mutations);
         }
 
         final Map<ByteBuffer, Map<String, List<Mutation>>> record = Collections.singletonMap(key, row);
@@ -92,9 +92,9 @@ public final class ThriftInserter extends Operation
         });
     }
 
-    protected List<Column> generateColumns()
+    protected List<Column> generateColumns(ByteBuffer key)
     {
-        final List<ByteBuffer> values = generateColumnValues();
+        final List<ByteBuffer> values = generateColumnValues(key);
         final List<Column> columns = new ArrayList<>(values.size());
 
         if (state.settings.columns.useTimeUUIDComparator)
@@ -104,7 +104,7 @@ public final class ThriftInserter extends Operation
             // TODO : consider randomly allocating column names in case where have fewer than max columns
             // but need to think about implications for indexes / indexed range slicer / other knock on effects
             for (int i = 0 ; i < values.size() ; i++)
-                columns.add(new Column(getColumnNameBytes(i)));
+                columns.add(new Column(state.settings.columns.names.get(i)));
 
         for (int i = 0 ; i < values.size() ; i++)
             columns.get(i)

@@ -1,4 +1,25 @@
 package org.apache.cassandra.stress.util;
+/*
+ * 
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ * 
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ * 
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ * 
+ */
+
 
 import java.nio.ByteBuffer;
 import java.util.*;
@@ -8,6 +29,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import com.datastax.driver.core.Host;
 import com.datastax.driver.core.Metadata;
+import com.google.common.collect.Iterators;
 import org.apache.cassandra.stress.settings.StressSettings;
 import org.apache.cassandra.thrift.*;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -86,14 +108,11 @@ public class SmartThriftClient implements ThriftClient
 
     private Client get(ByteBuffer pk)
     {
-        Set<Host> hosts = metadata.getReplicas(keyspace, pk);
-        int count = roundrobin.incrementAndGet() % hosts.size();
-        if (count < 0)
-            count = -count;
-        Iterator<Host> iter = hosts.iterator();
-        while (count > 0 && iter.hasNext())
-            iter.next();
-        Host host = iter.next();
+        Set<Host> hosts = metadata.getReplicas(metadata.quote(keyspace), pk);
+        int pos = roundrobin.incrementAndGet() % hosts.size();
+        if (pos < 0)
+            pos = -pos;
+        Host host = Iterators.get(hosts.iterator(), pos);
         ConcurrentLinkedQueue<Client> q = cache.get(host);
         if (q == null)
         {

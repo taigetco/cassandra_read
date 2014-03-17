@@ -310,7 +310,7 @@ public class FileUtils
         return f.delete();
     }
 
-    public static void delete(File[] files)
+    public static void delete(File... files)
     {
         for ( File file : files )
         {
@@ -446,5 +446,23 @@ public class FileUtils
             default:
                 throw new IllegalStateException();
         }
+    }
+
+    /**
+     * Get the size of a directory in bytes
+     * @param directory The directory for which we need size.
+     * @return The size of the directory
+     */
+    public static long folderSize(File directory)
+    {
+        long length = 0;
+        for (File file : directory.listFiles())
+        {
+            if (file.isFile())
+                length += file.length();
+            else
+                length += folderSize(file);
+        }
+        return length;
     }
 }

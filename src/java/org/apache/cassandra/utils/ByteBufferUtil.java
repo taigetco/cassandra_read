@@ -190,7 +190,7 @@ public class ByteBufferUtil
     }
 
     /**
-     * ByteBuffer adaptation of org.apache.commons.lang.ArrayUtils.lastIndexOf method
+     * ByteBuffer adaptation of org.apache.commons.lang3.ArrayUtils.lastIndexOf method
      *
      * @param buffer the array to traverse for looking for the object, may be <code>null</code>
      * @param valueToFind the value to find
@@ -557,5 +557,42 @@ public class ByteBufferUtil
     public static ByteBuffer minimalBufferFor(ByteBuffer buf)
     {
         return buf.capacity() > buf.remaining() ? ByteBuffer.wrap(getArray(buf)) : buf;
+    }
+
+    // Doesn't change bb position
+    public static int getShortLength(ByteBuffer bb, int position)
+    {
+        int length = (bb.get(position) & 0xFF) << 8;
+        return length | (bb.get(position + 1) & 0xFF);
+    }
+
+    // changes bb position
+    public static int readShortLength(ByteBuffer bb)
+    {
+        int length = (bb.get() & 0xFF) << 8;
+        return length | (bb.get() & 0xFF);
+    }
+
+    // changes bb position
+    public static void writeShortLength(ByteBuffer bb, int length)
+    {
+        bb.put((byte) ((length >> 8) & 0xFF));
+        bb.put((byte) (length & 0xFF));
+    }
+
+    // changes bb position
+    public static ByteBuffer readBytes(ByteBuffer bb, int length)
+    {
+        ByteBuffer copy = bb.duplicate();
+        copy.limit(copy.position() + length);
+        bb.position(bb.position() + length);
+        return copy;
+    }
+
+    // changes bb position
+    public static ByteBuffer readBytesWithShortLength(ByteBuffer bb)
+    {
+        int length = readShortLength(bb);
+        return readBytes(bb, length);
     }
 }

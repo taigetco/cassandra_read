@@ -24,7 +24,6 @@ import java.nio.channels.Channels;
 import java.nio.channels.WritableByteChannel;
 import java.util.Collection;
 
-import com.google.common.util.concurrent.RateLimiter;
 import com.ning.compress.lzf.LZFOutputStream;
 
 import org.apache.cassandra.io.sstable.Component;
@@ -33,6 +32,7 @@ import org.apache.cassandra.io.util.DataIntegrityMetadata;
 import org.apache.cassandra.io.util.DataIntegrityMetadata.ChecksumValidator;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.io.util.RandomAccessReader;
+import org.apache.cassandra.streaming.StreamManager.StreamRateLimiter;
 import org.apache.cassandra.utils.Pair;
 
 /**
@@ -44,7 +44,7 @@ public class StreamWriter
 
     protected final SSTableReader sstable;
     protected final Collection<Pair<Long, Long>> sections;
-    protected final RateLimiter limiter = StreamManager.getRateLimiter();
+    protected final StreamRateLimiter limiter;
     protected final StreamSession session;
 
     private OutputStream compressedOutput;
@@ -57,6 +57,7 @@ public class StreamWriter
         this.session = session;
         this.sstable = sstable;
         this.sections = sections;
+        this.limiter =  StreamManager.getRateLimiter(session.peer);
     }
 
     /**
@@ -71,10 +72,9 @@ public class StreamWriter
     {
         long totalSize = totalSize();
         RandomAccessReader file = sstable.openDataReader();
-        ChecksumValidator validator = null;
-        if (new File(sstable.descriptor.filenameFor(Component.CRC)).exists())
-            validator = DataIntegrityMetadata.checksumValidator(sstable.descriptor);
-
+        ChecksumValidator validator = new File(sstable.descriptor.filenameFor(Component.CRC)).exists()
+                                    ? DataIntegrityMetadata.checksumValidator(sstable.descriptor)
+                                    : null;
         transferBuffer = validator == null ? new byte[DEFAULT_CHUNK_SIZE] : new byte[validator.chunkSize];
 
         // setting up data compression stream
@@ -114,6 +114,7 @@ public class StreamWriter
         {
             // no matter what happens close file
             FileUtils.closeQuietly(file);
+            FileUtils.closeQuietly(validator);
         }
 
         // release reference only when completed successfully

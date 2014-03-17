@@ -87,12 +87,16 @@ public class StressAction implements Runnable
                     warmup(subtype, command);
                 return;
             case MULTI:
-                int keysAtOnce = ((SettingsCommandMulti) command).keysAtOnce;
+                int keysAtOnce = command.keysAtOnce;
                 iterations = Math.min(50000, (int) Math.ceil(500000d / keysAtOnce));
                 break;
             default:
                 throw new IllegalStateException();
         }
+
+        // we need to warm up all the nodes in the cluster ideally, but we may not be the only stress instance;
+        // so warm up all the nodes we're speaking to only.
+        iterations *= settings.node.nodes.size();
         output.println(String.format("Warming up %s with %d iterations...", type, iterations));
         run(type, 20, iterations, warmupOutput);
     }
@@ -151,9 +155,7 @@ public class StressAction implements Runnable
 
     private boolean hasAverageImprovement(List<StressMetrics> results, int count, double minImprovement)
     {
-        if (results.size() < count + 1)
-            return true;
-        return averageImprovement(results, count) >= minImprovement;
+        return results.size() < count + 1 || averageImprovement(results, count) >= minImprovement;
     }
 
     private double averageImprovement(List<StressMetrics> results, int count)
@@ -296,6 +298,8 @@ public class StressAction implements Runnable
                                 case SIMPLE_NATIVE:
                                     op.run(sclient);
                                     break;
+                                case THRIFT:
+                                case THRIFT_SMART:
                                 default:
                                     op.run(tclient);
                             }
@@ -385,7 +389,7 @@ public class StressAction implements Runnable
             int batchSize = (int) (operations / (1 << 19));
             if (batchSize < 20)
                 batchSize = 20;
-            ArrayBlockingQueue<Work> work = new ArrayBlockingQueue<Work>(
+            ArrayBlockingQueue<Work> work = new ArrayBlockingQueue<>(
                     (int) ((operations / batchSize)
                   + (operations % batchSize == 0 ? 0 : 1))
             );
@@ -460,7 +464,7 @@ public class StressAction implements Runnable
                 }
 
 
-            case COUNTERREAD:
+            case COUNTER_READ:
                 switch(state.settings.mode.style)
                 {
                     case THRIFT:
@@ -484,7 +488,7 @@ public class StressAction implements Runnable
                         throw new UnsupportedOperationException();
                 }
 
-            case COUNTERWRITE:
+            case COUNTER_WRITE:
                 switch(state.settings.mode.style)
                 {
                     case THRIFT:
@@ -496,7 +500,7 @@ public class StressAction implements Runnable
                         throw new UnsupportedOperationException();
                 }
 
-            case RANGESLICE:
+            case RANGE_SLICE:
                 switch(state.settings.mode.style)
                 {
                     case THRIFT:
@@ -508,7 +512,7 @@ public class StressAction implements Runnable
                         throw new UnsupportedOperationException();
                 }
 
-            case IRANGESLICE:
+            case INDEXED_RANGE_SLICE:
                 switch(state.settings.mode.style)
                 {
                     case THRIFT:
@@ -520,7 +524,7 @@ public class StressAction implements Runnable
                         throw new UnsupportedOperationException();
                 }
 
-            case READMULTI:
+            case READ_MULTI:
                 switch(state.settings.mode.style)
                 {
                     case THRIFT:
@@ -533,7 +537,8 @@ public class StressAction implements Runnable
                 }
 
             case MIXED:
-                return createOperation(state.readWriteSelector.next(), state, index);
+                Command subcommand = state.commandSelector.next();
+                return createOperation(subcommand, state.substate(subcommand), index);
 
         }
 

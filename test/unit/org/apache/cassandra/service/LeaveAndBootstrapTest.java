@@ -19,7 +19,6 @@
 
 package org.apache.cassandra.service;
 
-import java.io.IOException;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.*;
@@ -51,7 +50,7 @@ public class LeaveAndBootstrapTest
     private static IPartitioner oldPartitioner;
 
     @BeforeClass
-    public static void setup() throws IOException, ConfigurationException
+    public static void setup() throws ConfigurationException
     {
         oldPartitioner = StorageService.instance.setPartitionerUnsafe(partitioner);
         SchemaLoader.loadSchema();
@@ -108,6 +107,7 @@ public class LeaveAndBootstrapTest
                 valueFactory.leaving(Collections.singleton(endpointTokens.get(LEAVING_NODE))));
         assertTrue(tmd.isLeaving(hosts.get(LEAVING_NODE)));
 
+        Thread.sleep(100); // because there is a tight race between submit and blockUntilFinished
         PendingRangeCalculatorService.instance.blockUntilFinished();
 
         AbstractReplicationStrategy strategy;
@@ -141,7 +141,7 @@ public class LeaveAndBootstrapTest
      * simultaneously
      */
     @Test
-    public void testSimultaneousMove() throws UnknownHostException, ConfigurationException
+    public void testSimultaneousMove() throws UnknownHostException
     {
         StorageService ss = StorageService.instance;
         final int RING_SIZE = 10;
@@ -681,6 +681,19 @@ public class LeaveAndBootstrapTest
         assertEquals("rack42", SystemKeyspace.loadDcRackInfo().get(toRemove).get("rack"));
     }
 
+    @Test
+    public void testRemovingStatusForNonMember()  throws UnknownHostException
+    {
+        // create a ring of 1 node
+        StorageService ss = StorageService.instance;
+        VersionedValue.VersionedValueFactory valueFactory = new VersionedValue.VersionedValueFactory(partitioner);
+        Util.createInitialRing(ss, partitioner, new ArrayList<Token>(), new ArrayList<Token>(),  new ArrayList<InetAddress>(), new ArrayList<UUID>(), 1);
+
+        // make a REMOVING state change on a non-member endpoint; without the CASSANDRA-6564 fix, this
+        // would result in an ArrayIndexOutOfBoundsException
+        ss.onChange(InetAddress.getByName("192.168.1.42"), ApplicationState.STATUS, valueFactory.removingNonlocal(UUID.randomUUID()));
+    }
+
     private static Collection<InetAddress> makeAddrs(String... hosts) throws UnknownHostException
     {
         ArrayList<InetAddress> addrs = new ArrayList<InetAddress>(hosts.length);
@@ -689,7 +702,7 @@ public class LeaveAndBootstrapTest
         return addrs;
     }
 
-    private AbstractReplicationStrategy getStrategy(String keyspaceName, TokenMetadata tmd) throws ConfigurationException
+    private AbstractReplicationStrategy getStrategy(String keyspaceName, TokenMetadata tmd)
     {
         KSMetaData ksmd = Schema.instance.getKSMetaData(keyspaceName);
         return AbstractReplicationStrategy.createReplicationStrategy(

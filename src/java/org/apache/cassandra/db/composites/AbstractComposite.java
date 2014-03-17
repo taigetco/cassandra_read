@@ -21,12 +21,19 @@ import java.nio.ByteBuffer;
 
 import org.apache.cassandra.db.filter.ColumnSlice;
 import org.apache.cassandra.db.marshal.AbstractCompositeType;
+import org.apache.cassandra.db.marshal.CompositeType;
+import org.apache.cassandra.utils.ByteBufferUtil;
 
 public abstract class AbstractComposite implements Composite
 {
     public boolean isEmpty()
     {
         return size() == 0;
+    }
+
+    public boolean isStatic()
+    {
+        return false;
     }
 
     public EOC eoc()
@@ -67,11 +74,14 @@ public abstract class AbstractComposite implements Composite
     {
         // This is the legacy format of composites.
         // See org.apache.cassandra.db.marshal.CompositeType for details.
-        ByteBuffer result = ByteBuffer.allocate(dataSize() + 3 * size());
+        ByteBuffer result = ByteBuffer.allocate(dataSize() + 3 * size() + (isStatic() ? 2 : 0));
+        if (isStatic())
+            ByteBufferUtil.writeShortLength(result, CompositeType.STATIC_MARKER);
+
         for (int i = 0; i < size(); i++)
         {
             ByteBuffer bb = get(i);
-            AbstractCompositeType.putShortLength(result, bb.remaining());
+            ByteBufferUtil.writeShortLength(result, bb.remaining());
             result.put(bb.duplicate());
             result.put((byte)0);
         }
@@ -89,7 +99,7 @@ public abstract class AbstractComposite implements Composite
 
     public boolean isPrefixOf(Composite c)
     {
-        if (size() > c.size())
+        if (size() > c.size() || isStatic() != c.isStatic())
             return false;
 
         for (int i = 0; i < size(); i++)
@@ -110,7 +120,7 @@ public abstract class AbstractComposite implements Composite
             return false;
 
         Composite c = (Composite)o;
-        if (size() != c.size())
+        if (size() != c.size() || isStatic() != c.isStatic())
             return false;
 
         for (int i = 0; i < size(); i++)
@@ -127,6 +137,6 @@ public abstract class AbstractComposite implements Composite
         int h = 31;
         for (int i = 0; i < size(); i++)
             h += get(i).hashCode();
-        return h + eoc().hashCode();
+        return h + eoc().hashCode() + (isStatic() ? 1 : 0);
     }
 }

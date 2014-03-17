@@ -1,8 +1,25 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package org.apache.cassandra.utils.btree;
 
 import java.util.Comparator;
 
-import static org.apache.cassandra.utils.btree.BTree.MAX_DEPTH;
 import static org.apache.cassandra.utils.btree.BTree.getBranchKeyEnd;
 import static org.apache.cassandra.utils.btree.BTree.getKeyEnd;
 import static org.apache.cassandra.utils.btree.BTree.getLeafKeyEnd;
@@ -28,25 +45,28 @@ class Path
         LOWER   // the greatest element strictly less than the given element
     }
 
-    static Path newPath()
+    // the path to the searched-for key
+    Object[][] path;
+    // the index within the node of our path at a given depth
+    byte[] indexes;
+    // current depth.  nothing in path[i] for i > depth is valid.
+    byte depth = -1;
+
+    Path() { }
+    Path(int depth)
     {
-        // try to encourage stack allocation - probably misguided/unnecessary. but no harm
-        Object[][] path = new Object[MAX_DEPTH][];
-        byte[] index = new byte[MAX_DEPTH];
-        return new Path(path, index);
+        this.path = new Object[depth][];
+        this.indexes = new byte[depth];
     }
 
-    // the path to the searched-for key
-    final Object[][] path;
-    // the index within the node of our path at a given depth
-    final byte[] indexes;
-    // current depth.  nothing in path[i] for i > depth is valid.
-    byte depth;
-
-    Path(Object[][] path, byte[] indexes)
+    void ensureDepth(Object[] btree)
     {
-        this.path = path;
-        this.indexes = indexes;
+        int depth = BTree.depth(btree);
+        if (path == null || path.length < depth)
+        {
+            path = new Object[depth][];
+            indexes = new byte[depth];
+        }
     }
 
     /**
