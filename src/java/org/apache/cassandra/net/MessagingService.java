@@ -50,6 +50,7 @@ import org.apache.cassandra.gms.GossipDigestAck;
 import org.apache.cassandra.gms.GossipDigestAck2;
 import org.apache.cassandra.gms.GossipDigestSyn;
 import org.apache.cassandra.io.IVersionedSerializer;
+import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.locator.ILatencySubscriber;
 import org.apache.cassandra.metrics.ConnectionMetrics;
@@ -69,10 +70,14 @@ public final class MessagingService implements MessagingServiceMBean
     public static final String MBEAN_NAME = "org.apache.cassandra.net:type=MessagingService";
 
     // 8 bits version, so don't waste versions
-    public static final int VERSION_12  = 6;
-    public static final int VERSION_20  = 7;
-    public static final int VERSION_21  = 8;
+    public static final int VERSION_12 = 6;
+    public static final int VERSION_20 = 7;
+    public static final int VERSION_21 = 8;
     public static final int current_version = VERSION_21;
+
+    public static final String FAILURE_CALLBACK_PARAM = "CAL_BAC";
+    public static final byte[] ONE_BYTE = new byte[1];
+    public static final String FAILURE_RESPONSE_PARAM = "FAIL";
 
     /**
      * we preface every message with this number so the recipient can validate the sender is sane
@@ -165,7 +170,6 @@ public final class MessagingService implements MessagingServiceMBean
         put(Verb.MIGRATION_REQUEST, Stage.MIGRATION);
         put(Verb.INDEX_SCAN, Stage.READ);
         put(Verb.REPLICATION_FINISHED, Stage.MISC);
-        put(Verb.INTERNAL_RESPONSE, Stage.INTERNAL_RESPONSE);
         put(Verb.COUNTER_MUTATION, Stage.MUTATION);
         put(Verb.SNAPSHOT, Stage.MISC);
         put(Verb.ECHO, Stage.GOSSIP);
@@ -249,7 +253,7 @@ public final class MessagingService implements MessagingServiceMBean
             throw new UnsupportedOperationException();
         }
 
-        public void serialize(Object o, DataOutput out, int version) throws IOException
+        public void serialize(Object o, DataOutputPlus out, int version) throws IOException
         {
             throw new UnsupportedOperationException();
         }
@@ -328,10 +332,19 @@ public final class MessagingService implements MessagingServiceMBean
         {
             public Object apply(Pair<Integer, ExpiringMap.CacheableObject<CallbackInfo>> pair)
             {
-                CallbackInfo expiredCallbackInfo = pair.right.value;
+                final CallbackInfo expiredCallbackInfo = pair.right.value;
                 maybeAddLatency(expiredCallbackInfo.callback, expiredCallbackInfo.target, pair.right.timeout);
                 ConnectionMetrics.totalTimeouts.mark();
                 getConnectionPool(expiredCallbackInfo.target).incrementTimeout();
+                if (expiredCallbackInfo.isFailureCallback())
+                {
+                    StageManager.getStage(Stage.INTERNAL_RESPONSE).submit(new Runnable() {
+                        @Override
+                        public void run() {
+                            ((IAsyncCallbackWithFailure)expiredCallbackInfo.callback).onFailure(expiredCallbackInfo.target);
+                        }
+                    });
+                }
 
                 if (expiredCallbackInfo.shouldHint())
                 {
@@ -475,6 +488,11 @@ public final class MessagingService implements MessagingServiceMBean
         }
     }
 
+    public boolean isListening()
+    {
+        return listenGate.isSignaled();
+    }
+
     public void destroyConnectionPool(InetAddress to)
     {
         OutboundTcpConnectionPool cp = connectionManagers.get(to);
@@ -531,11 +549,11 @@ public final class MessagingService implements MessagingServiceMBean
         return verbHandlers.get(type);
     }
 
-    public int addCallback(IAsyncCallback cb, MessageOut message, InetAddress to, long timeout)
+    public int addCallback(IAsyncCallback cb, MessageOut message, InetAddress to, long timeout, boolean failureCallback)
     {
         assert message.verb != Verb.MUTATION; // mutations need to call the overload with a ConsistencyLevel
         int messageId = nextId();
-        CallbackInfo previous = callbacks.put(messageId, new CallbackInfo(to, cb, callbackDeserializers.get(message.verb)), timeout);
+        CallbackInfo previous = callbacks.put(messageId, new CallbackInfo(to, cb, callbackDeserializers.get(message.verb), failureCallback), timeout);
         assert previous == null : String.format("Callback already exists for id %d! (%s)", messageId, previous);
         return messageId;
     }
@@ -558,7 +576,12 @@ public final class MessagingService implements MessagingServiceMBean
 
     public int sendRR(MessageOut message, InetAddress to, IAsyncCallback cb)
     {
-        return sendRR(message, to, cb, message.getTimeout());
+        return sendRR(message, to, cb, message.getTimeout(), false);
+    }
+
+    public int sendRRWithFailure(MessageOut message, InetAddress to, IAsyncCallbackWithFailure cb)
+    {
+        return sendRR(message, to, cb, message.getTimeout(), true);
     }
 
     /**
@@ -575,10 +598,10 @@ public final class MessagingService implements MessagingServiceMBean
      * @param timeout the timeout used for expiration
      * @return an reference to message id used to match with the result
      */
-    public int sendRR(MessageOut message, InetAddress to, IAsyncCallback cb, long timeout)
+    public int sendRR(MessageOut message, InetAddress to, IAsyncCallback cb, long timeout, boolean failureCallback)
     {
-        int id = addCallback(cb, message, to, timeout);
-        sendOneWay(message, id, to);
+        int id = addCallback(cb, message, to, timeout, failureCallback);
+        sendOneWay(failureCallback ? message.withParameter(FAILURE_CALLBACK_PARAM, ONE_BYTE) : message, id, to);
         return id;
     }
 

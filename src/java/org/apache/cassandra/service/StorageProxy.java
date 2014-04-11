@@ -56,6 +56,7 @@ import org.apache.cassandra.gms.Gossiper;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.locator.AbstractReplicationStrategy;
 import org.apache.cassandra.locator.IEndpointSnitch;
+import org.apache.cassandra.locator.LocalStrategy;
 import org.apache.cassandra.locator.TokenMetadata;
 import org.apache.cassandra.metrics.ClientRequestMetrics;
 import org.apache.cassandra.metrics.ReadRepairMetrics;
@@ -237,9 +238,19 @@ public class StorageProxy implements StorageProxyMBean
 
             // finish the paxos round w/ the desired updates
             // TODO turn null updates into delete?
+
+            // Apply triggers to cas updates. A consideration here is that
+            // triggers emit Mutations, and so a given trigger implementation
+            // may generate mutations for partitions other than the one this
+            // paxos round is scoped for. In this case, TriggerExecutor will
+            // validate that the generated mutations are targetted at the same
+            // partition as the initial updates and reject (via an
+            // InvalidRequestException) any which aren't.
+            updates = TriggerExecutor.instance.execute(key, updates);
+
             Commit proposal = Commit.newProposal(key, ballot, updates);
             Tracing.trace("CAS precondition is met; proposing client-requested updates for {}", ballot);
-            if (proposePaxos(proposal, liveEndpoints, requiredParticipants, true))
+            if (proposePaxos(proposal, liveEndpoints, requiredParticipants, true, consistencyForPaxos))
             {
                 if (consistencyForCommit == ConsistencyLevel.ANY)
                     sendCommit(proposal, liveEndpoints);
@@ -311,7 +322,7 @@ public class StorageProxy implements StorageProxyMBean
             // prepare
             Tracing.trace("Preparing {}", ballot);
             Commit toPrepare = Commit.newPrepare(key, metadata, ballot);
-            summary = preparePaxos(toPrepare, liveEndpoints, requiredParticipants);
+            summary = preparePaxos(toPrepare, liveEndpoints, requiredParticipants, consistencyForPaxos);
             if (!summary.promised)
             {
                 Tracing.trace("Some replicas have already promised a higher ballot than ours; aborting");
@@ -329,7 +340,7 @@ public class StorageProxy implements StorageProxyMBean
             {
                 Tracing.trace("Finishing incomplete paxos round {}", inProgress);
                 Commit refreshedInProgress = Commit.newProposal(inProgress.key, ballot, inProgress.update);
-                if (proposePaxos(refreshedInProgress, liveEndpoints, requiredParticipants, false))
+                if (proposePaxos(refreshedInProgress, liveEndpoints, requiredParticipants, false, consistencyForPaxos))
                 {
                     commitPaxos(refreshedInProgress, ConsistencyLevel.QUORUM);
                 }
@@ -374,10 +385,10 @@ public class StorageProxy implements StorageProxyMBean
             MessagingService.instance().sendOneWay(message, target);
     }
 
-    private static PrepareCallback preparePaxos(Commit toPrepare, List<InetAddress> endpoints, int requiredParticipants)
+    private static PrepareCallback preparePaxos(Commit toPrepare, List<InetAddress> endpoints, int requiredParticipants, ConsistencyLevel consistencyForPaxos)
     throws WriteTimeoutException
     {
-        PrepareCallback callback = new PrepareCallback(toPrepare.key, toPrepare.update.metadata(), requiredParticipants);
+        PrepareCallback callback = new PrepareCallback(toPrepare.key, toPrepare.update.metadata(), requiredParticipants, consistencyForPaxos);
         MessageOut<Commit> message = new MessageOut<Commit>(MessagingService.Verb.PAXOS_PREPARE, toPrepare, Commit.serializer);
         for (InetAddress target : endpoints)
             MessagingService.instance().sendRR(message, target, callback);
@@ -385,10 +396,10 @@ public class StorageProxy implements StorageProxyMBean
         return callback;
     }
 
-    private static boolean proposePaxos(Commit proposal, List<InetAddress> endpoints, int requiredParticipants, boolean timeoutIfPartial)
+    private static boolean proposePaxos(Commit proposal, List<InetAddress> endpoints, int requiredParticipants, boolean timeoutIfPartial, ConsistencyLevel consistencyLevel)
     throws WriteTimeoutException
     {
-        ProposeCallback callback = new ProposeCallback(endpoints.size(), requiredParticipants, !timeoutIfPartial);
+        ProposeCallback callback = new ProposeCallback(endpoints.size(), requiredParticipants, !timeoutIfPartial, consistencyLevel);
         MessageOut<Commit> message = new MessageOut<Commit>(MessagingService.Verb.PAXOS_PROPOSE, proposal, Commit.serializer);
         for (InetAddress target : endpoints)
             MessagingService.instance().sendRR(message, target, callback);
@@ -399,7 +410,7 @@ public class StorageProxy implements StorageProxyMBean
             return true;
 
         if (timeoutIfPartial && !callback.isFullyRefused())
-            throw new WriteTimeoutException(WriteType.CAS, ConsistencyLevel.SERIAL, callback.getAcceptCount(), requiredParticipants);
+            throw new WriteTimeoutException(WriteType.CAS, consistencyLevel, callback.getAcceptCount(), requiredParticipants);
 
         return false;
     }
@@ -597,40 +608,53 @@ public class StorageProxy implements StorageProxyMBean
                                                                         Keyspace.open(Keyspace.SYSTEM_KS),
                                                                         null,
                                                                         WriteType.BATCH_LOG);
-        updateBatchlog(BatchlogManager.getBatchlogMutationFor(mutations, uuid), endpoints, handler);
+
+        MessageOut<Mutation> message = BatchlogManager.getBatchlogMutationFor(mutations, uuid, MessagingService.current_version)
+                                                      .createMessage();
+        for (InetAddress target : endpoints)
+        {
+            int targetVersion = MessagingService.instance().getVersion(target);
+            if (target.equals(FBUtilities.getBroadcastAddress()) && OPTIMIZE_LOCAL_REQUESTS)
+            {
+                insertLocal(message.payload, handler);
+            }
+            else if (targetVersion == MessagingService.current_version)
+            {
+                MessagingService.instance().sendRR(message, target, handler);
+            }
+            else
+            {
+                MessagingService.instance().sendRR(BatchlogManager.getBatchlogMutationFor(mutations, uuid, targetVersion)
+                                                                  .createMessage(),
+                                                   target,
+                                                   handler);
+            }
+        }
+
         handler.get();
     }
 
     private static void asyncRemoveFromBatchlog(Collection<InetAddress> endpoints, UUID uuid)
     {
-        ColumnFamily cf = ArrayBackedSortedColumns.factory.create(Schema.instance.getCFMetaData(Keyspace.SYSTEM_KS, SystemKeyspace.BATCHLOG_CF));
-        cf.delete(new DeletionInfo(FBUtilities.timestampMicros(), (int) (System.currentTimeMillis() / 1000)));
         AbstractWriteResponseHandler handler = new WriteResponseHandler(endpoints,
                                                                         Collections.<InetAddress>emptyList(),
                                                                         ConsistencyLevel.ANY,
                                                                         Keyspace.open(Keyspace.SYSTEM_KS),
                                                                         null,
                                                                         WriteType.SIMPLE);
-        updateBatchlog(new Mutation(Keyspace.SYSTEM_KS, UUIDType.instance.decompose(uuid), cf), endpoints, handler);
-    }
-
-    private static void updateBatchlog(Mutation mutation, Collection<InetAddress> endpoints, AbstractWriteResponseHandler handler)
-    {
-        if (endpoints.contains(FBUtilities.getBroadcastAddress()))
+        Mutation mutation = new Mutation(Keyspace.SYSTEM_KS, UUIDType.instance.decompose(uuid));
+        mutation.delete(SystemKeyspace.BATCHLOG_CF, FBUtilities.timestampMicros());
+        MessageOut<Mutation> message = mutation.createMessage();
+        for (InetAddress target : endpoints)
         {
-            assert endpoints.size() == 1;
-            insertLocal(mutation, handler);
-        }
-        else
-        {
-            MessageOut<Mutation> message = mutation.createMessage();
-            for (InetAddress target : endpoints)
+            if (target.equals(FBUtilities.getBroadcastAddress()) && OPTIMIZE_LOCAL_REQUESTS)
+                insertLocal(message.payload, handler);
+            else
                 MessagingService.instance().sendRR(message, target, handler);
         }
     }
 
-    private static void syncWriteBatchedMutations(List<WriteResponseHandlerWrapper> wrappers,
-                                                  String localDataCenter)
+    private static void syncWriteBatchedMutations(List<WriteResponseHandlerWrapper> wrappers, String localDataCenter)
     throws WriteTimeoutException, OverloadedException
     {
         for (WriteResponseHandlerWrapper wrapper : wrappers)
@@ -640,9 +664,7 @@ public class StorageProxy implements StorageProxyMBean
         }
 
         for (WriteResponseHandlerWrapper wrapper : wrappers)
-        {
             wrapper.handler.get();
-        }
     }
 
     /**
@@ -1429,8 +1451,15 @@ public class StorageProxy implements StorageProxyMBean
         try
         {
             int cql3RowCount = 0;
-            rows = new ArrayList<Row>();
-            List<AbstractBounds<RowPosition>> ranges = getRestrictedRanges(command.keyRange);
+            rows = new ArrayList<>();
+
+            // when dealing with LocalStrategy keyspaces, we can skip the range splitting and merging (which can be
+            // expensive in clusters with vnodes)
+            List<? extends AbstractBounds<RowPosition>> ranges;
+            if (keyspace.getReplicationStrategy() instanceof LocalStrategy)
+                ranges = command.keyRange.unwrap();
+            else
+                ranges = getRestrictedRanges(command.keyRange);
 
             // our estimate of how many result rows there will be per-range
             float resultRowsPerRange = estimateResultRowsPerRange(command, keyspace);
@@ -1505,7 +1534,8 @@ public class StorageProxy implements StorageProxyMBean
 
                     // collect replies and resolve according to consistency level
                     RangeSliceResponseResolver resolver = new RangeSliceResponseResolver(nodeCmd.keyspace, command.timestamp);
-                    ReadCallback<RangeSliceReply, Iterable<Row>> handler = new ReadCallback<>(resolver, consistency_level, nodeCmd, filteredEndpoints);
+                    List<InetAddress> minimalEndpoints = filteredEndpoints.subList(0, Math.min(filteredEndpoints.size(), consistency_level.blockFor(keyspace)));
+                    ReadCallback<RangeSliceReply, Iterable<Row>> handler = new ReadCallback<>(resolver, consistency_level, nodeCmd, minimalEndpoints);
                     handler.assureSufficientLiveNodes();
                     resolver.setSources(filteredEndpoints);
                     if (filteredEndpoints.size() == 1

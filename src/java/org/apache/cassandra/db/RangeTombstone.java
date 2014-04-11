@@ -29,6 +29,7 @@ import org.apache.cassandra.db.composites.Composite;
 import org.apache.cassandra.io.ISSTableSerializer;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.util.DataOutputBuffer;
+import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.Interval;
 
@@ -54,12 +55,7 @@ public class RangeTombstone extends Interval<Composite, DeletionTime> implements
         return data.localDeletionTime;
     }
 
-    public long minTimestamp()
-    {
-        return data.markedForDeleteAt;
-    }
-
-    public long maxTimestamp()
+    public long timestamp()
     {
         return data.markedForDeleteAt;
     }
@@ -127,7 +123,7 @@ public class RangeTombstone extends Interval<Composite, DeletionTime> implements
          * Returns the total serialized size of said tombstones and write them
          * to {@code out} it if isn't null.
          */
-        public long writeOpenedMarker(OnDiskAtom firstColumn, DataOutput out, OnDiskAtom.Serializer atomSerializer) throws IOException
+        public long writeOpenedMarker(OnDiskAtom firstColumn, DataOutputPlus out, OnDiskAtom.Serializer atomSerializer) throws IOException
         {
             long size = 0;
             if (ranges.isEmpty())
@@ -232,7 +228,7 @@ public class RangeTombstone extends Interval<Composite, DeletionTime> implements
             {
                 if (comparator.compare(cell.name(), tombstone.min) >= 0
                     && comparator.compare(cell.name(), tombstone.max) <= 0
-                    && tombstone.maxTimestamp() >= cell.timestamp())
+                    && tombstone.timestamp() >= cell.timestamp())
                 {
                     return true;
                 }
@@ -250,7 +246,7 @@ public class RangeTombstone extends Interval<Composite, DeletionTime> implements
             this.type = type;
         }
 
-        public void serializeForSSTable(RangeTombstone t, DataOutput out) throws IOException
+        public void serializeForSSTable(RangeTombstone t, DataOutputPlus out) throws IOException
         {
             type.serializer().serialize(t.min, out);
             out.writeByte(ColumnSerializer.RANGE_TOMBSTONE_MASK);

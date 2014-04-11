@@ -50,6 +50,7 @@ import locale
 import platform
 import warnings
 import csv
+import getpass
 
 
 readline = None
@@ -91,7 +92,7 @@ futures_zip = find_zip(FUTURES_LIB_PREFIX)
 if futures_zip:
     sys.path.insert(0, futures_zip)
 
-
+warnings.filterwarnings("ignore", r".*blist.*")
 try:
     import cassandra
 except ImportError, e:
@@ -465,7 +466,9 @@ class Shell(cmd.Cmd):
         self.hostname = hostname
         self.port = port
         self.auth_provider = None
-        if username and password:
+        if username:
+            if not password:
+                password = getpass.getpass()
             self.auth_provider = lambda host: dict(username=username, password=password)
         self.keyspace = keyspace
         self.tracing_enabled = tracing_enabled
@@ -477,6 +480,7 @@ class Shell(cmd.Cmd):
                                 auth_provider=self.auth_provider,
                                 ssl_options=sslhandling.ssl_settings(hostname, CONFIG_FILE) if ssl else None,
                                 load_balancing_policy=WhiteListRoundRobinPolicy([self.hostname]))
+        self.owns_connection = not use_conn
         self.set_expanded_cql_version(cqlver)
 
         if keyspace:
@@ -1621,7 +1625,8 @@ class Shell(cmd.Cmd):
         Exits cqlsh.
         """
         self.stop = True
-        self.conn.shutdown()
+        if self.owns_connection:
+            self.conn.shutdown()
     do_quit = do_exit
 
     def do_debug(self, parsed):

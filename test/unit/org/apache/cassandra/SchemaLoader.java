@@ -21,19 +21,19 @@ import java.io.File;
 import java.nio.ByteBuffer;
 import java.util.*;
 
-import org.apache.cassandra.cache.CachingOptions;
-import org.apache.cassandra.db.index.PerRowSecondaryIndexTest;
-import org.apache.cassandra.db.index.SecondaryIndex;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import org.apache.cassandra.cache.CachingOptions;
 import org.apache.cassandra.config.*;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.compaction.LeveledCompactionStrategy;
+import org.apache.cassandra.db.index.PerRowSecondaryIndexTest;
+import org.apache.cassandra.db.index.SecondaryIndex;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.gms.Gossiper;
@@ -65,6 +65,7 @@ public class SchemaLoader
             }
         });
 
+        Keyspace.setInitialized();
         // Migrations aren't happy if gossiper is not started.  Even if we don't use migrations though,
         // some tests now expect us to start gossip for them.
         startGossiper();
@@ -148,6 +149,7 @@ public class SchemaLoader
                                            indexCFMD(ks1, "Indexed1", true),
                                            indexCFMD(ks1, "Indexed2", false),
                                            CFMetaData.denseCFMetaData(ks1, "StandardInteger1", IntegerType.instance),
+                                           CFMetaData.denseCFMetaData(ks1, "StandardLong3", IntegerType.instance),
                                            CFMetaData.denseCFMetaData(ks1, "Counter1", bytes).defaultValidator(CounterColumnType.instance),
                                            CFMetaData.denseCFMetaData(ks1, "SuperCounter1", bytes, bytes).defaultValidator(CounterColumnType.instance),
                                            superCFMD(ks1, "SuperDirectGC", BytesType.instance).gcGraceSeconds(0),
@@ -167,8 +169,12 @@ public class SchemaLoader
                                                                                .compactionStrategyOptions(leveledOptions),
                                            standardCFMD(ks1, "StandardLowIndexInterval").minIndexInterval(8)
                                                                                         .maxIndexInterval(256)
-                                                                                        .caching(CachingOptions.NONE)));
+                                                                                        .caching(CachingOptions.NONE),
 
+                                           standardCFMD(ks1, "UUIDKeys").keyValidator(UUIDType.instance),
+                                           CFMetaData.denseCFMetaData(ks1, "MixedTypes", LongType.instance).keyValidator(UUIDType.instance).defaultValidator(BooleanType.instance),
+                                           CFMetaData.denseCFMetaData(ks1, "MixedTypesComposite", composite).keyValidator(composite).defaultValidator(BooleanType.instance)
+        ));
 
         // Keyspace 2
         schema.add(KSMetaData.testMetadata(ks2,

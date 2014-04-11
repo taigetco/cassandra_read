@@ -186,20 +186,54 @@ public class NodeProbe implements AutoCloseable
         jmxc.close();
     }
 
-    public void forceKeyspaceCleanup(String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
+    public CompactionManager.AllSSTableOpStatus forceKeyspaceCleanup(String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
     {
-        ssProxy.forceKeyspaceCleanup(keyspaceName, columnFamilies);
+        return ssProxy.forceKeyspaceCleanup(keyspaceName, columnFamilies);
     }
 
-    public void scrub(boolean disableSnapshot, boolean skipCorrupted, String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
+    public CompactionManager.AllSSTableOpStatus scrub(boolean disableSnapshot, boolean skipCorrupted, String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
     {
-        ssProxy.scrub(disableSnapshot, skipCorrupted, keyspaceName, columnFamilies);
+        return ssProxy.scrub(disableSnapshot, skipCorrupted, keyspaceName, columnFamilies);
     }
 
-    public void upgradeSSTables(String keyspaceName, boolean excludeCurrentVersion, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
+    public CompactionManager.AllSSTableOpStatus upgradeSSTables(String keyspaceName, boolean excludeCurrentVersion, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
     {
-        ssProxy.upgradeSSTables(keyspaceName, excludeCurrentVersion, columnFamilies);
+        return ssProxy.upgradeSSTables(keyspaceName, excludeCurrentVersion, columnFamilies);
     }
+
+    public void forceKeyspaceCleanup(PrintStream out, String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
+    {
+        switch (forceKeyspaceCleanup(keyspaceName, columnFamilies))
+        {
+            case ABORTED:
+                failed = true;
+                out.println("Aborted cleaning up atleast one column family in keyspace "+keyspaceName+", check server logs for more information.");
+                break;
+        }
+    }
+
+    public void scrub(PrintStream out, boolean disableSnapshot, boolean skipCorrupted, String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
+    {
+        switch (scrub(disableSnapshot, skipCorrupted, keyspaceName, columnFamilies))
+        {
+            case ABORTED:
+                failed = true;
+                out.println("Aborted scrubbing atleast one column family in keyspace "+keyspaceName+", check server logs for more information.");
+                break;
+        }
+    }
+
+    public void upgradeSSTables(PrintStream out, String keyspaceName, boolean excludeCurrentVersion, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
+    {
+        switch (upgradeSSTables(keyspaceName, excludeCurrentVersion, columnFamilies))
+        {
+            case ABORTED:
+                failed = true;
+                out.println("Aborted upgrading sstables for atleast one column family in keyspace "+keyspaceName+", check server logs for more information.");
+                break;
+        }
+    }
+
 
     public void forceKeyspaceCompaction(String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
     {
@@ -209,11 +243,6 @@ public class NodeProbe implements AutoCloseable
     public void forceKeyspaceFlush(String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
     {
         ssProxy.forceKeyspaceFlush(keyspaceName, columnFamilies);
-    }
-
-    public void forceKeyspaceRepair(String keyspaceName, boolean isSequential, boolean isLocal, boolean fullRepair, String... columnFamilies) throws IOException
-    {
-        ssProxy.forceKeyspaceRepair(keyspaceName, isSequential, isLocal, fullRepair, columnFamilies);
     }
 
     public void forceRepairAsync(final PrintStream out, final String keyspaceName, boolean isSequential, Collection<String> dataCenters, Collection<String> hosts, boolean primaryRange, boolean fullRepair, String... columnFamilies) throws IOException
@@ -270,16 +299,6 @@ public class NodeProbe implements AutoCloseable
                 out.println("Exception occurred during clean-up. " + e);
             }
         }
-    }
-
-    public void forceKeyspaceRepairPrimaryRange(String keyspaceName, boolean isSequential, boolean isLocal, boolean fullRepair, String... columnFamilies) throws IOException
-    {
-        ssProxy.forceKeyspaceRepairPrimaryRange(keyspaceName, isSequential, isLocal, fullRepair, columnFamilies);
-    }
-
-    public void forceKeyspaceRepairRange(String beginToken, String endToken, String keyspaceName, boolean isSequential, boolean isLocal, boolean fullRepair, String... columnFamilies) throws IOException
-    {
-        ssProxy.forceKeyspaceRepairRange(beginToken, endToken, keyspaceName, isSequential, isLocal, fullRepair, columnFamilies);
     }
 
     public void invalidateCounterCache()

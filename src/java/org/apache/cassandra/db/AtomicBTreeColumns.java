@@ -32,15 +32,15 @@ import com.google.common.collect.*;
 
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.composites.CellName;
-import org.apache.cassandra.db.composites.CellNameType;
 import org.apache.cassandra.db.composites.Composite;
 import org.apache.cassandra.db.index.SecondaryIndexManager;
 import org.apache.cassandra.db.filter.ColumnSlice;
 import org.apache.cassandra.utils.ObjectSizes;
+import org.apache.cassandra.utils.SearchIterator;
 import org.apache.cassandra.utils.btree.BTree;
+import org.apache.cassandra.utils.btree.BTreeSearchIterator;
 import org.apache.cassandra.utils.btree.BTreeSet;
 import org.apache.cassandra.utils.btree.UpdateFunction;
-import org.apache.cassandra.utils.memory.AbstractAllocator;
 
 import static org.apache.cassandra.db.index.SecondaryIndexManager.Updater;
 
@@ -121,6 +121,11 @@ public class AtomicBTreeColumns extends ColumnFamily
         delete(new DeletionInfo(tombstone, getComparator()));
     }
 
+    public SearchIterator<CellName, Cell> searchIterator()
+    {
+        return new BTreeSearchIterator<>(ref.tree, asymmetricComparator());
+    }
+
     public void delete(DeletionInfo info)
     {
         if (info.isLive())
@@ -162,16 +167,14 @@ public class AtomicBTreeColumns extends ColumnFamily
     {
         final AtomicBTreeColumns updating;
         final Holder ref;
-        final AbstractAllocator allocator;
         final Function<Cell, Cell> transform;
         final Updater indexer;
         final Delta delta;
 
-        private ColumnUpdater(AtomicBTreeColumns updating, Holder ref, AbstractAllocator allocator, Function<Cell, Cell> transform, Updater indexer, Delta delta)
+        private ColumnUpdater(AtomicBTreeColumns updating, Holder ref, Function<Cell, Cell> transform, Updater indexer, Delta delta)
         {
             this.updating = updating;
             this.ref = ref;
-            this.allocator = allocator;
             this.transform = transform;
             this.indexer = indexer;
             this.delta = delta;
@@ -186,7 +189,7 @@ public class AtomicBTreeColumns extends ColumnFamily
 
         public Cell apply(Cell existing, Cell update)
         {
-            Cell reconciled = update.reconcile(existing, allocator);
+            Cell reconciled = update.reconcile(existing);
             indexer.update(existing, reconciled);
             if (existing != reconciled)
                 delta.swap(existing, reconciled);
@@ -225,7 +228,7 @@ public class AtomicBTreeColumns extends ColumnFamily
      *
      * @return the difference in size seen after merging the given columns
      */
-    public Delta addAllWithSizeDelta(final ColumnFamily cm, AbstractAllocator allocator, Function<Cell, Cell> transformation, Updater indexer, Delta delta)
+    public Delta addAllWithSizeDelta(final ColumnFamily cm, Function<Cell, Cell> transformation, Updater indexer, Delta delta)
     {
         boolean transformed = false;
         Collection<Cell> insert = cm.getSortedColumns();
@@ -243,7 +246,7 @@ public class AtomicBTreeColumns extends ColumnFamily
                     for (Iterator<RangeTombstone> rangeIterator = cm.deletionInfo().rangeIterator(); rangeIterator.hasNext(); )
                     {
                         RangeTombstone rt = rangeIterator.next();
-                        long deleteAt = rt.maxTimestamp();
+                        long deleteAt = rt.timestamp();
                         for (Iterator<Cell> iter = current.cellRange(getComparator().columnComparator(), rt.min, rt.max); iter.hasNext(); )
                         {
                             Cell c = iter.next();
@@ -261,7 +264,7 @@ public class AtomicBTreeColumns extends ColumnFamily
                 deletionInfo = current.deletionInfo;
             }
 
-            ColumnUpdater updater = new ColumnUpdater(this, current, allocator, transformation, indexer, delta);
+            ColumnUpdater updater = new ColumnUpdater(this, current, transformation, indexer, delta);
             Object[] tree = BTree.update(current.tree, metadata.comparator.columnComparator(), insert, true, updater);
 
             if (tree != null && refUpdater.compareAndSet(this, current, new Holder(tree, deletionInfo)))
@@ -349,6 +352,11 @@ public class AtomicBTreeColumns extends ColumnFamily
     public int getColumnCount()
     {
         return BTree.slice(ref.tree, true).count();
+    }
+
+    public boolean hasColumns()
+    {
+        return !BTree.isEmpty(ref.tree);
     }
 
     public Iterator<Cell> iterator(ColumnSlice[] slices)

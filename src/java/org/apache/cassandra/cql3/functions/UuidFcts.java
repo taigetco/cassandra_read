@@ -15,27 +15,28 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.cassandra.cql3.hooks;
+package org.apache.cassandra.cql3.functions;
 
+import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.UUID;
 
-import org.apache.cassandra.cql3.ColumnSpecification;
-import org.apache.cassandra.service.ClientState;
+import org.apache.cassandra.db.marshal.UUIDType;
+import org.apache.cassandra.serializers.UUIDSerializer;
 
-/**
- * Contextual information about the preparation of a CQLStatement.
- * Used by {@link org.apache.cassandra.cql3.hooks.PostPreparationHook}
- */
-public class PreparationContext
+public abstract class UuidFcts
 {
-    public final ClientState clientState;
-    public final String queryString;
-    public final List<ColumnSpecification> boundNames;
-
-    public PreparationContext(ClientState clientState, String queryString, List<ColumnSpecification> boundNames)
+    public static final Function uuidFct = new AbstractFunction("uuid", UUIDType.instance)
     {
-        this.clientState = clientState;
-        this.queryString = queryString;
-        this.boundNames = boundNames;
-    }
+        public ByteBuffer execute(List<ByteBuffer> parameters)
+        {
+            return UUIDSerializer.instance.serialize(UUID.randomUUID());
+        }
+
+        @Override
+        public boolean isPure()
+        {
+            return false;
+        }
+    };
 }

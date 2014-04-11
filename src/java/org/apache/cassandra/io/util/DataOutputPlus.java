@@ -15,33 +15,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.cassandra.utils.memory;
+package org.apache.cassandra.io.util;
 
-import org.apache.cassandra.utils.concurrent.OpOrder;
-
+import java.io.DataOutput;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 
-public final class HeapPoolAllocator extends PoolAllocator
+public interface DataOutputPlus extends DataOutput
 {
-    HeapPoolAllocator(HeapPool pool)
-    {
-        super(pool);
-    }
 
-    public ByteBuffer allocate(int size)
-    {
-        return allocate(size, null);
-    }
+    // write the buffer without modifying its position
+    void write(ByteBuffer buffer) throws IOException;
 
-    public ByteBuffer allocate(int size, OpOrder.Group opGroup)
-    {
-        markAllocated(size, opGroup);
-        // must loop trying to acquire
-        return ByteBuffer.allocate(size);
-    }
+    void write(Memory memory) throws IOException;
 
-    public void free(ByteBuffer name)
-    {
-        release(name.remaining());
-    }
 }

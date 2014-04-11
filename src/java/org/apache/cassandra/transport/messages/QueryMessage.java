@@ -22,9 +22,9 @@ import java.util.Collections;
 import java.util.UUID;
 
 import com.google.common.collect.ImmutableMap;
-import org.jboss.netty.buffer.ChannelBuffer;
+import io.netty.buffer.ByteBuf;
 
-import org.apache.cassandra.cql3.QueryProcessor;
+import org.apache.cassandra.cql3.QueryHandler;
 import org.apache.cassandra.cql3.QueryOptions;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.exceptions.*;
@@ -40,7 +40,7 @@ public class QueryMessage extends Message.Request
 {
     public static final Message.Codec<QueryMessage> codec = new Message.Codec<QueryMessage>()
     {
-        public QueryMessage decode(ChannelBuffer body, int version)
+        public QueryMessage decode(ByteBuf body, int version)
         {
             String query = CBUtil.readLongString(body);
             if (version == 1)
@@ -54,7 +54,7 @@ public class QueryMessage extends Message.Request
             }
         }
 
-        public void encode(QueryMessage msg, ChannelBuffer dest, int version)
+        public void encode(QueryMessage msg, ByteBuf dest, int version)
         {
             CBUtil.writeLongString(msg.query, dest);
             if (version == 1)
@@ -115,7 +115,7 @@ public class QueryMessage extends Message.Request
                 Tracing.instance.begin("Execute CQL3 query", builder.build());
             }
 
-            Message.Response response = QueryProcessor.process(query, state, options);
+            Message.Response response = state.getClientState().getCQLQueryHandler().process(query, state, options);
             if (options.skipMetadata() && response instanceof ResultMessage.Rows)
                 ((ResultMessage.Rows)response).result.metadata.setSkipMetadata();
 

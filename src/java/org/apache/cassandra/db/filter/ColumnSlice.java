@@ -22,7 +22,6 @@ import java.nio.ByteBuffer;
 import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
-import java.util.NavigableMap;
 import java.util.NavigableSet;
 
 import com.google.common.collect.AbstractIterator;
@@ -33,6 +32,7 @@ import org.apache.cassandra.db.composites.*;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.io.ISerializer;
 import org.apache.cassandra.io.IVersionedSerializer;
+import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.memory.AbstractAllocator;
 import org.apache.cassandra.utils.memory.PoolAllocator;
@@ -75,14 +75,44 @@ public class ColumnSlice
         Composite sStart = reversed ? finish : start;
         Composite sEnd = reversed ? start : finish;
 
+        if (compare(sStart, maxCellNames, comparator, true) > 0 || compare(sEnd, minCellNames, comparator, false) < 0)
+            return false;
+
+        // We could safely return true here, but there's a minor optimization: if the first component is restricted
+        // to a single value, we can check that the second component falls within the min/max for that component
+        // (and repeat for all components).
         for (int i = 0; i < minCellNames.size(); i++)
         {
             AbstractType<?> t = comparator.subtype(i);
-            if (  (i < sEnd.size() && t.compare(sEnd.get(i), minCellNames.get(i)) < 0)
-               || (i < sStart.size() && t.compare(sStart.get(i), maxCellNames.get(i)) > 0))
+            ByteBuffer s = i < sStart.size() ? sStart.get(i) : ByteBufferUtil.EMPTY_BYTE_BUFFER;
+            ByteBuffer f = i < sEnd.size() ? sEnd.get(i) : ByteBufferUtil.EMPTY_BYTE_BUFFER;
+
+            // we already know the first component falls within its min/max range (otherwise we wouldn't get here)
+            if (i > 0 && (i < sEnd.size() && t.compare(f, minCellNames.get(i)) < 0 ||
+                          i < sStart.size() && t.compare(s, maxCellNames.get(i)) > 0))
                 return false;
+
+            // if this component isn't equal in the start and finish, we don't need to check any more
+            if (i >= sStart.size() || i >= sEnd.size() || t.compare(s, f) != 0)
+                break;
         }
+
         return true;
+    }
+
+    /** Helper method for intersects() */
+    private int compare(Composite sliceBounds, List<ByteBuffer> sstableBounds, CellNameType comparator, boolean isSliceStart)
+    {
+        for (int i = 0; i < sstableBounds.size(); i++)
+        {
+            if (i >= sliceBounds.size())
+                return isSliceStart ? -1 : 1;
+
+            int comparison = comparator.subtype(i).compare(sliceBounds.get(i), sstableBounds.get(i));
+            if (comparison != 0)
+                return comparison;
+        }
+        return 0;
     }
 
     @Override
@@ -116,7 +146,7 @@ public class ColumnSlice
             this.type = type;
         }
 
-        public void serialize(ColumnSlice cs, DataOutput out, int version) throws IOException
+        public void serialize(ColumnSlice cs, DataOutputPlus out, int version) throws IOException
         {
             ISerializer<Composite> serializer = type.serializer();
             serializer.serialize(cs.start, out);
@@ -267,7 +297,7 @@ public class ColumnSlice
         }
 
         @Override
-        public void free(PoolAllocator<?> allocator)
+        public void free(PoolAllocator allocator)
         {
             throw new UnsupportedOperationException();
         }

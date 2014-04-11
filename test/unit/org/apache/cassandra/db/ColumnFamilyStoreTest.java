@@ -29,6 +29,8 @@ import java.util.concurrent.Future;
 import com.google.common.base.Function;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
+import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.io.util.FileUtils;
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.junit.Test;
@@ -139,13 +141,13 @@ public class ColumnFamilyStoreTest extends SchemaLoader
             {
                 QueryFilter sliceFilter = QueryFilter.getSliceFilter(Util.dk("key1"), "Standard2", Composites.EMPTY, Composites.EMPTY, false, 1, System.currentTimeMillis());
                 ColumnFamily cf = store.getColumnFamily(sliceFilter);
-                assert cf.isMarkedForDelete();
-                assert cf.getColumnCount() == 0;
+                assertTrue(cf.isMarkedForDelete());
+                assertFalse(cf.hasColumns());
 
                 QueryFilter namesFilter = Util.namesQueryFilter(store, Util.dk("key1"), "a");
                 cf = store.getColumnFamily(namesFilter);
-                assert cf.isMarkedForDelete();
-                assert cf.getColumnCount() == 0;
+                assertTrue(cf.isMarkedForDelete());
+                assertFalse(cf.hasColumns());
             }
         };
 
@@ -239,7 +241,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         key = new String(rows.get(0).key.key.array(),rows.get(0).key.key.position(),rows.get(0).key.key.remaining());
         assert "k3".equals( key );
 
-        assert rows.get(0).cf.getColumnCount() == 0;
+        assertFalse(rows.get(0).cf.hasColumns());
 
         // query with index hit but rejected by secondary clause, with a small enough count that just checking count
         // doesn't tell the scan loop that it's done
@@ -1186,7 +1188,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
                                                    cellname("c2"),
                                                    false,
                                                    0);
-        rows = cfs.getRangeSlice(cfs.makeExtendedFilter(new Bounds<RowPosition>(ka, kc), sf, cellname("c2"), cellname("c1"), null, 2, System.currentTimeMillis()));
+        rows = cfs.getRangeSlice(cfs.makeExtendedFilter(new Bounds<RowPosition>(ka, kc), sf, cellname("c2"), cellname("c1"), null, 2, true, System.currentTimeMillis()));
         assert rows.size() == 2 : "Expected 2 rows, got " + toString(rows);
         iter = rows.iterator();
         row1 = iter.next();
@@ -1194,7 +1196,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         assertColumnNames(row1, "c2");
         assertColumnNames(row2, "c1");
 
-        rows = cfs.getRangeSlice(cfs.makeExtendedFilter(new Bounds<RowPosition>(kb, kc), sf, cellname("c1"), cellname("c1"), null, 10, System.currentTimeMillis()));
+        rows = cfs.getRangeSlice(cfs.makeExtendedFilter(new Bounds<RowPosition>(kb, kc), sf, cellname("c1"), cellname("c1"), null, 10, true, System.currentTimeMillis()));
         assert rows.size() == 2 : "Expected 2 rows, got " + toString(rows);
         iter = rows.iterator();
         row1 = iter.next();
@@ -1726,6 +1728,83 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         sstables = dir.sstableLister().list();
         assert sstables.size() == 1;
         assert sstables.containsKey(sstable1.descriptor);
+    }
+
+    @Test
+    public void testLoadNewSSTablesAvoidsOverwrites() throws Throwable
+    {
+        String ks = "Keyspace1";
+        String cf = "Standard1";
+        ColumnFamilyStore cfs = Keyspace.open(ks).getColumnFamilyStore(cf);
+        cfs.truncateBlocking();
+        SSTableDeletingTask.waitForDeletions();
+
+        final CFMetaData cfmeta = Schema.instance.getCFMetaData(ks, cf);
+        Directories dir = new Directories(cfs.metadata);
+
+        // clear old SSTables (probably left by CFS.clearUnsafe() calls in other tests)
+        for (Map.Entry<Descriptor, Set<Component>> entry : dir.sstableLister().list().entrySet())
+        {
+            for (Component component : entry.getValue())
+            {
+                FileUtils.delete(entry.getKey().filenameFor(component));
+            }
+        }
+
+        // sanity check
+        int existingSSTables = dir.sstableLister().list().keySet().size();
+        assert existingSSTables == 0 : String.format("%d SSTables unexpectedly exist", existingSSTables);
+
+        ByteBuffer key = bytes("key");
+
+        SSTableSimpleWriter writer = new SSTableSimpleWriter(dir.getDirectoryForCompactedSSTables(),
+                                                              cfmeta, StorageService.getPartitioner());
+        writer.newRow(key);
+        writer.addColumn(bytes("col"), bytes("val"), 1);
+        writer.close();
+
+        writer = new SSTableSimpleWriter(dir.getDirectoryForCompactedSSTables(),
+                                         cfmeta, StorageService.getPartitioner());
+        writer.newRow(key);
+        writer.addColumn(bytes("col"), bytes("val"), 1);
+        writer.close();
+
+        Set<Integer> generations = new HashSet<>();
+        for (Descriptor descriptor : dir.sstableLister().list().keySet())
+            generations.add(descriptor.generation);
+
+        // we should have two generations: [1, 2]
+        assertEquals(2, generations.size());
+        assertTrue(generations.contains(1));
+        assertTrue(generations.contains(2));
+
+        assertEquals(0, cfs.getSSTables().size());
+
+        // start the generation counter at 1 again (other tests have incremented it already)
+        cfs.resetFileIndexGenerator();
+
+        boolean incrementalBackupsEnabled = DatabaseDescriptor.isIncrementalBackupsEnabled();
+        try
+        {
+            // avoid duplicate hardlinks to incremental backups
+            DatabaseDescriptor.setIncrementalBackupsEnabled(false);
+            cfs.loadNewSSTables();
+        }
+        finally
+        {
+            DatabaseDescriptor.setIncrementalBackupsEnabled(incrementalBackupsEnabled);
+        }
+
+        assertEquals(2, cfs.getSSTables().size());
+        generations = new HashSet<>();
+        for (Descriptor descriptor : dir.sstableLister().list().keySet())
+            generations.add(descriptor.generation);
+
+        // normally they would get renamed to generations 1 and 2, but since those filenames already exist,
+        // they get skipped and we end up with generations 3 and 4
+        assertEquals(2, generations.size());
+        assertTrue(generations.contains(3));
+        assertTrue(generations.contains(4));
     }
 
     private ColumnFamilyStore prepareMultiRangeSlicesTest(int valueSize, boolean flush) throws Throwable

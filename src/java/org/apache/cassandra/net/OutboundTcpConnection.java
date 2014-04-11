@@ -19,7 +19,7 @@ package org.apache.cassandra.net;
 
 import java.io.BufferedOutputStream;
 import java.io.DataInputStream;
-import java.io.DataOutputStream;
+import java.io.DataOutput;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.Socket;
@@ -44,6 +44,7 @@ import net.jpountz.lz4.LZ4BlockOutputStream;
 import net.jpountz.lz4.LZ4Compressor;
 import net.jpountz.lz4.LZ4Factory;
 import net.jpountz.xxhash.XXHashFactory;
+import org.apache.cassandra.io.util.DataOutputStreamPlus;
 import org.apache.cassandra.tracing.TraceState;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.FBUtilities;
@@ -72,7 +73,7 @@ public class OutboundTcpConnection extends Thread
 
     private final OutboundTcpConnectionPool poolReference;
 
-    private DataOutputStream out;
+    private DataOutputStreamPlus out;
     private Socket socket;
     private volatile long completed;
     private final AtomicLong dropped = new AtomicLong();
@@ -157,7 +158,7 @@ public class OutboundTcpConnection extends Thread
                             break outer;
                         continue;
                     }
-                    if (qm.timestamp < System.currentTimeMillis() - m.getTimeout())
+                    if (qm.isTimedOut(m.getTimeout()))
                         dropped.incrementAndGet();
                     else if (socket != null || connect())
                         writeConnected(qm, count == 1 && backlog.size() == 0);
@@ -273,7 +274,7 @@ public class OutboundTcpConnection extends Thread
         message.serialize(out, targetVersion);
     }
 
-    private static void writeHeader(DataOutputStream out, int version, boolean compressionEnabled) throws IOException
+    private static void writeHeader(DataOutput out, int version, boolean compressionEnabled) throws IOException
     {
         // 2 bits: unused.  used to be "serializer type," which was always Binary
         // 1 bit: compression
@@ -339,7 +340,7 @@ public class OutboundTcpConnection extends Thread
                         logger.warn("Failed to set send buffer size on internode socket.", se);
                     }
                 }
-                out = new DataOutputStream(new BufferedOutputStream(socket.getOutputStream(), 4096));
+                out = new DataOutputStreamPlus(new BufferedOutputStream(socket.getOutputStream(), 4096));
 
                 out.writeInt(MessagingService.PROTOCOL_MAGIC);
                 writeHeader(out, targetVersion, shouldCompressConnection());
@@ -380,13 +381,15 @@ public class OutboundTcpConnection extends Thread
                     logger.trace("Upgrading OutputStream to be compressed");
                     if (targetVersion < MessagingService.VERSION_21)
                     {
-                        out = new DataOutputStream(new SnappyOutputStream(new BufferedOutputStream(socket.getOutputStream())));
+                        // Snappy is buffered, so no need for extra buffering output stream
+                        out = new DataOutputStreamPlus(new SnappyOutputStream(socket.getOutputStream()));
                     }
                     else
                     {
+                        // TODO: custom LZ4 OS that supports BB write methods
                         LZ4Compressor compressor = LZ4Factory.fastestInstance().fastCompressor();
                         Checksum checksum = XXHashFactory.fastestInstance().newStreamingHash32(LZ4_HASH_SEED).asChecksum();
-                        out = new DataOutputStream(new LZ4BlockOutputStream(new BufferedOutputStream(socket.getOutputStream()),
+                        out = new DataOutputStreamPlus(new LZ4BlockOutputStream(socket.getOutputStream(),
                                                                             1 << 14,  // 16k block size
                                                                             compressor,
                                                                             checksum,
@@ -467,17 +470,25 @@ public class OutboundTcpConnection extends Thread
         final MessageOut<?> message;
         final int id;
         final long timestamp;
+        final boolean droppable;
 
         QueuedMessage(MessageOut<?> message, int id)
         {
             this.message = message;
             this.id = id;
             this.timestamp = System.currentTimeMillis();
+            this.droppable = MessagingService.DROPPABLE_VERBS.contains(message.verb);
+        }
+
+        /** don't drop a non-droppable message just because it's timestamp is expired */
+        boolean isTimedOut(long maxTime)
+        {
+            return droppable && timestamp < System.currentTimeMillis() - maxTime;
         }
 
         boolean shouldRetry()
         {
-            return !MessagingService.DROPPABLE_VERBS.contains(message.verb);
+            return !droppable;
         }
     }
 

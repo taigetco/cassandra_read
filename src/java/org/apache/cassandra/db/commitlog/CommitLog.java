@@ -32,8 +32,7 @@ import org.apache.cassandra.config.Config;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.io.FSWriteError;
-import org.apache.cassandra.io.util.ByteBufferOutputStream;
-import org.apache.cassandra.io.util.ChecksummedOutputStream;
+import org.apache.cassandra.io.util.DataOutputByteBuffer;
 import org.apache.cassandra.metrics.CommitLogMetrics;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.utils.PureJavaCrc32;
@@ -203,8 +202,8 @@ public class CommitLog implements CommitLogMBean
         long totalSize = size + ENTRY_OVERHEAD_SIZE;
         if (totalSize > MAX_MUTATION_SIZE)
         {
-            logger.warn("Skipping commitlog append of extremely large mutation ({} bytes)", totalSize);
-            return alloc;
+            throw new IllegalArgumentException(String.format("Mutation of %s bytes is too large for the maxiumum size of %s",
+                                                             totalSize, MAX_MUTATION_SIZE));
         }
 
         allocator.allocate(mutation, (int) totalSize, alloc);
@@ -212,14 +211,17 @@ public class CommitLog implements CommitLogMBean
         {
             PureJavaCrc32 checksum = new PureJavaCrc32();
             final ByteBuffer buffer = alloc.getBuffer();
-            DataOutputStream dos = new DataOutputStream(new ChecksummedOutputStream(new ByteBufferOutputStream(buffer), checksum));
+            DataOutputByteBuffer dos = new DataOutputByteBuffer(buffer);
 
             // checksummed length
             dos.writeInt((int) size);
+            checksum.update(buffer, buffer.position() - 4, 4);
             buffer.putLong(checksum.getValue());
 
+            int start = buffer.position();
             // checksummed mutation
             Mutation.serializer.serialize(mutation, dos, MessagingService.current_version);
+            checksum.update(buffer, start, (int) size);
             buffer.putLong(checksum.getValue());
         }
         catch (IOException e)

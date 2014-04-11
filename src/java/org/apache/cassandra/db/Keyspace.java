@@ -19,16 +19,21 @@ package org.apache.cassandra.db;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Future;
+import java.util.concurrent.locks.Lock;
 
 import com.google.common.base.Function;
 import com.google.common.collect.Iterables;
-
-import org.apache.cassandra.utils.concurrent.OpOrder;
-import org.apache.cassandra.db.commitlog.ReplayPosition;
+import com.google.common.util.concurrent.Striped;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,6 +42,7 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.KSMetaData;
 import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.commitlog.CommitLog;
+import org.apache.cassandra.db.commitlog.ReplayPosition;
 import org.apache.cassandra.db.filter.QueryFilter;
 import org.apache.cassandra.db.index.SecondaryIndex;
 import org.apache.cassandra.db.index.SecondaryIndexManager;
@@ -45,6 +51,7 @@ import org.apache.cassandra.locator.AbstractReplicationStrategy;
 import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.service.pager.QueryPagers;
 import org.apache.cassandra.tracing.Tracing;
+import org.apache.cassandra.utils.concurrent.OpOrder;
 
 /**
  * It represents a Keyspace.
@@ -55,6 +62,8 @@ public class Keyspace
     private static final int DEFAULT_PAGE_SIZE = 10000;
 
     private static final Logger logger = LoggerFactory.getLogger(Keyspace.class);
+
+    private static final Striped<Lock> counterLocks = Striped.lazyWeakLock(DatabaseDescriptor.getConcurrentCounterWriters() * 1024);
 
     // It is possible to call Keyspace.open without a running daemon, so it makes sense to ensure
     // proper directories here as well as in CassandraDaemon.
@@ -78,13 +87,21 @@ public class Keyspace
         }
     };
 
+    private static volatile boolean initialized = false;
+    public static void setInitialized()
+    {
+        initialized = true;
+    }
+
     public static Keyspace open(String keyspaceName)
     {
+        assert initialized || keyspaceName.equals(SYSTEM_KS);
         return open(keyspaceName, Schema.instance, true);
     }
 
     public static Keyspace openWithoutSSTables(String keyspaceName)
     {
+        assert initialized || keyspaceName.equals(SYSTEM_KS);
         return open(keyspaceName, Schema.instance, false);
     }
 
@@ -171,6 +188,15 @@ public class Keyspace
     }
 
     /**
+     * @param keys the keys to grab the locks for
+     * @return the striped lock instances
+     */
+    public static Iterable<Lock> counterLocksFor(Iterable<Object> keys)
+    {
+        return counterLocks.bulkGet(keys);
+    }
+
+    /**
      * Take a snapshot of the specific column family, or the entire set of column families
      * if columnFamily is null with a given timestamp
      *
@@ -232,9 +258,9 @@ public class Keyspace
      * @param snapshotName the user supplied snapshot name. It empty or null,
      *                     all the snapshots will be cleaned
      */
-    public void clearSnapshot(String snapshotName)
+    public static void clearSnapshot(String snapshotName, String keyspace)
     {
-        List<File> snapshotDirs = Directories.getKSChildDirectories(getName());
+        List<File> snapshotDirs = Directories.getKSChildDirectories(keyspace);
         Directories.clearSnapshot(snapshotName, snapshotDirs);
     }
 
@@ -338,8 +364,7 @@ public class Keyspace
      */
     public void apply(Mutation mutation, boolean writeCommitLog, boolean updateIndexes)
     {
-        final OpOrder.Group opGroup = writeOrder.start();
-        try
+        try (OpOrder.Group opGroup = writeOrder.start())
         {
             // write the mutation to the commitlog and memtables
             final ReplayPosition replayPosition;
@@ -370,10 +395,6 @@ public class Keyspace
                 cfs.apply(key, cf, updater, opGroup, replayPosition);
             }
         }
-        finally
-        {
-            opGroup.finishOne();
-        }
     }
 
     public AbstractReplicationStrategy getReplicationStrategy()
@@ -391,10 +412,9 @@ public class Keyspace
         if (logger.isDebugEnabled())
             logger.debug("Indexing row {} ", cfs.metadata.getKeyValidator().getString(key.key));
 
-        final OpOrder.Group opGroup = cfs.keyspace.writeOrder.start();
-        try
+        try (OpOrder.Group opGroup = cfs.keyspace.writeOrder.start())
         {
-            Collection<SecondaryIndex> indexes = cfs.indexManager.getIndexesByNames(idxNames);
+            Set<SecondaryIndex> indexes = cfs.indexManager.getIndexesByNames(idxNames);
 
             Iterator<ColumnFamily> pager = QueryPagers.pageRowLocally(cfs, key.key, DEFAULT_PAGE_SIZE);
             while (pager.hasNext())
@@ -408,10 +428,6 @@ public class Keyspace
                 }
                 cfs.indexManager.indexRow(key.key, cf2, opGroup);
             }
-        }
-        finally
-        {
-            opGroup.finishOne();
         }
     }
 

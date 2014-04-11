@@ -20,19 +20,37 @@ package org.apache.cassandra.db.compaction;
 import java.io.File;
 import java.io.IOException;
 import java.lang.management.ManagementFactory;
-import java.util.*;
-import java.util.concurrent.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
 import javax.management.openmbean.OpenDataException;
 import javax.management.openmbean.TabularData;
 
 import com.google.common.base.Throwables;
-import com.google.common.collect.*;
+import com.google.common.collect.ArrayListMultimap;
+import com.google.common.collect.ConcurrentHashMultiset;
+import com.google.common.collect.Iterables;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Multimap;
+import com.google.common.collect.Multiset;
+import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.RateLimiter;
-
-import org.apache.cassandra.utils.concurrent.OpOrder;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -42,20 +60,31 @@ import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Schema;
-import org.apache.cassandra.db.*;
+import org.apache.cassandra.db.Cell;
+import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.DecoratedKey;
+import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.db.OnDiskAtom;
+import org.apache.cassandra.db.SystemKeyspace;
 import org.apache.cassandra.db.compaction.CompactionInfo.Holder;
 import org.apache.cassandra.db.index.SecondaryIndexBuilder;
 import org.apache.cassandra.dht.Bounds;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
-import org.apache.cassandra.io.sstable.*;
+import org.apache.cassandra.io.sstable.Descriptor;
+import org.apache.cassandra.io.sstable.SSTableIdentityIterator;
+import org.apache.cassandra.io.sstable.SSTableReader;
+import org.apache.cassandra.io.sstable.SSTableWriter;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.metrics.CompactionMetrics;
 import org.apache.cassandra.repair.Validator;
 import org.apache.cassandra.service.ActiveRepairService;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.utils.*;
+import org.apache.cassandra.utils.CloseableIterator;
+import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.WrappedRunnable;
+import org.apache.cassandra.utils.concurrent.OpOrder;
 
 /**
  * A singleton which manages a private executor of ongoing compactions.
@@ -209,45 +238,80 @@ public class CompactionManager implements CompactionManagerMBean
         }
     }
 
-    private static interface AllSSTablesOperation
+    private abstract static class UnmarkingRunnable implements Runnable
     {
-        public void perform(ColumnFamilyStore store, Iterable<SSTableReader> sstables) throws IOException;
+        private final ColumnFamilyStore cfs;
+        private final Iterable<SSTableReader> sstables;
+
+        private UnmarkingRunnable(ColumnFamilyStore cfs, Iterable<SSTableReader> sstables)
+        {
+            this.cfs = cfs;
+            this.sstables = sstables;
+        }
+
+        protected abstract void runMayThrow() throws IOException;
+
+        public final void run()
+        {
+            try
+            {
+                runMayThrow();
+            }
+            catch (Exception e)
+            {
+                throw Throwables.propagate(e);
+            }
+            finally
+            {
+                cfs.getDataTracker().unmarkCompacting(sstables);
+            }
+        }
     }
 
-    private void performAllSSTableOperation(final ColumnFamilyStore cfs, final AllSSTablesOperation operation) throws InterruptedException, ExecutionException
+    public enum AllSSTableOpStatus { ABORTED, SUCCESSFUL }
+
+    public AllSSTableOpStatus performScrub(final ColumnFamilyStore cfs, final boolean skipCorrupted) throws InterruptedException, ExecutionException
     {
         final Iterable<SSTableReader> sstables = cfs.markAllCompacting();
         if (sstables == null)
-            return;
-
-        Callable<Object> runnable = new Callable<Object>()
         {
-            public Object call() throws IOException
+            logger.info("Aborting scrub of {}.{} after failing to interrupt other compaction operations", cfs.keyspace.getName(), cfs.name);
+            return AllSSTableOpStatus.ABORTED;
+        }
+        if (Iterables.isEmpty(sstables))
+        {
+            logger.info("No sstables to scrub for {}.{}", cfs.keyspace.getName(), cfs.name);
+            return AllSSTableOpStatus.SUCCESSFUL;
+        }
+
+        Runnable runnable = new UnmarkingRunnable(cfs, sstables)
+        {
+            protected void runMayThrow() throws IOException
             {
-                operation.perform(cfs, sstables);
-                cfs.getDataTracker().unmarkCompacting(sstables);
-                return this;
+                doScrub(cfs, sstables, skipCorrupted);
             }
         };
         executor.submit(runnable).get();
+        return AllSSTableOpStatus.SUCCESSFUL;
     }
 
-    public void performScrub(ColumnFamilyStore cfStore, final boolean skipCorrupted) throws InterruptedException, ExecutionException
+    public AllSSTableOpStatus performSSTableRewrite(final ColumnFamilyStore cfs, final boolean excludeCurrentVersion) throws InterruptedException, ExecutionException
     {
-        performAllSSTableOperation(cfStore, new AllSSTablesOperation()
+        final Iterable<SSTableReader> sstables = cfs.markAllCompacting();
+        if (sstables == null)
         {
-            public void perform(ColumnFamilyStore store, Iterable<SSTableReader> sstables) throws IOException
-            {
-                doScrub(store, sstables, skipCorrupted);
-            }
-        });
-    }
+            logger.info("Aborting sstable format upgrade of {}.{} after failing to interrupt other compaction operations", cfs.keyspace.getName(), cfs.name);
+            return AllSSTableOpStatus.ABORTED;
+        }
+        if (Iterables.isEmpty(sstables))
+        {
+            logger.info("No sstables to upgrade for {}.{}", cfs.keyspace.getName(), cfs.name);
+            return AllSSTableOpStatus.SUCCESSFUL;
+        }
 
-    public void performSSTableRewrite(ColumnFamilyStore cfStore, final boolean excludeCurrentVersion) throws InterruptedException, ExecutionException
-    {
-        performAllSSTableOperation(cfStore, new AllSSTablesOperation()
+        Runnable runnable = new UnmarkingRunnable(cfs, sstables)
         {
-            public void perform(ColumnFamilyStore cfs, Iterable<SSTableReader> sstables)
+            protected void runMayThrow() throws IOException
             {
                 for (final SSTableReader sstable : sstables)
                 {
@@ -256,29 +320,45 @@ public class CompactionManager implements CompactionManagerMBean
 
                     // SSTables are marked by the caller
                     // NOTE: it is important that the task create one and only one sstable, even for Leveled compaction (see LeveledManifest.replace())
-                    CompactionTask task = new CompactionTask(cfs, Collections.singletonList(sstable), NO_GC);
+                    AbstractCompactionTask task = cfs.getCompactionStrategy().getCompactionTask(Collections.singleton(sstable), NO_GC, Long.MAX_VALUE);
                     task.setUserDefined(true);
                     task.setCompactionType(OperationType.UPGRADE_SSTABLES);
                     task.execute(metrics);
                 }
             }
-        });
+        };
+        executor.submit(runnable).get();
+        return AllSSTableOpStatus.SUCCESSFUL;
     }
 
-    public void performCleanup(ColumnFamilyStore cfStore) throws InterruptedException, ExecutionException
+    public AllSSTableOpStatus performCleanup(final ColumnFamilyStore cfStore) throws InterruptedException, ExecutionException
     {
-        performAllSSTableOperation(cfStore, new AllSSTablesOperation()
+        final Iterable<SSTableReader> sstables = cfStore.markAllCompacting();
+        if (sstables == null)
         {
-            public void perform(ColumnFamilyStore store, Iterable<SSTableReader> sstables) throws IOException
+            logger.info("Aborting cleanup of {}.{} after failing to interrupt other compaction operations", cfStore.keyspace.getName(), cfStore.name);
+            return AllSSTableOpStatus.ABORTED;
+        }
+        if (Iterables.isEmpty(sstables))
+        {
+            logger.info("No sstables to cleanup for {}.{}", cfStore.keyspace.getName(), cfStore.name);
+            return AllSSTableOpStatus.SUCCESSFUL;
+        }
+
+        Runnable runnable = new UnmarkingRunnable(cfStore, sstables)
+        {
+            protected void runMayThrow() throws IOException
             {
                 // Sort the column families in order of SSTable size, so cleanup of smaller CFs
                 // can free up space for larger ones
                 List<SSTableReader> sortedSSTables = Lists.newArrayList(sstables);
                 Collections.sort(sortedSSTables, new SSTableReader.SizeComparator());
 
-                doCleanupCompaction(store, sortedSSTables);
+                doCleanupCompaction(cfStore, sortedSSTables);
             }
-        });
+        };
+        executor.submit(runnable).get();
+        return AllSSTableOpStatus.SUCCESSFUL;
     }
 
     public Future<?> submitAntiCompaction(final ColumnFamilyStore cfs,
@@ -780,14 +860,9 @@ public class CompactionManager implements CompactionManagerMBean
                 if (indexedColumnsInRow != null && !indexedColumnsInRow.isEmpty())
                 {
                     // acquire memtable lock here because secondary index deletion may cause a race. See CASSANDRA-3712
-                    final OpOrder.Group opGroup = cfs.keyspace.writeOrder.start();
-                    try
+                    try (OpOrder.Group opGroup = cfs.keyspace.writeOrder.start())
                     {
                         cfs.indexManager.deleteFromIndexes(row.getKey(), indexedColumnsInRow, opGroup);
-                    }
-                    finally
-                    {
-                        opGroup.finishOne();
                     }
                 }
                 return null;

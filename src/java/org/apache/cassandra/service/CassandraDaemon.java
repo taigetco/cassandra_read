@@ -31,12 +31,12 @@ import javax.management.MBeanServer;
 import javax.management.ObjectName;
 import javax.management.StandardMBean;
 
-import com.addthis.metrics.reporter.config.ReporterConfig;
 import com.google.common.collect.Iterables;
 import com.google.common.util.concurrent.Uninterruptibles;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.addthis.metrics.reporter.config.ReporterConfig;
 import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
 import org.apache.cassandra.concurrent.Stage;
 import org.apache.cassandra.concurrent.StageManager;
@@ -51,6 +51,7 @@ import org.apache.cassandra.db.commitlog.CommitLog;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.io.FSError;
+import org.apache.cassandra.io.sstable.CorruptSSTableException;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.metrics.StorageMetrics;
 import org.apache.cassandra.thrift.ThriftServer;
@@ -176,6 +177,13 @@ public class CassandraDaemon
                             logger.error("Exception in thread {}", t, e2);
                         FileUtils.handleFSError((FSError) e2);
                     }
+
+                    if (e2 instanceof CorruptSSTableException)
+                    {
+                        if (e2 != e)
+                            logger.error("Exception in thread " + t, e2);
+                        FileUtils.handleCorruptSSTable((CorruptSSTableException) e2);
+                    }
                 }
             }
         });
@@ -249,6 +257,7 @@ public class CassandraDaemon
                 ColumnFamilyStore.scrubDataDirectories(cfm);
         }
 
+        Keyspace.setInitialized();
         // initialize keyspaces
         for (String keyspaceName : Schema.instance.getKeyspaces())
         {

@@ -23,11 +23,9 @@ import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 
-import org.jboss.netty.buffer.ChannelBuffer;
+import io.netty.buffer.ByteBuf;
 
-import org.apache.cassandra.cql3.Attributes;
-import org.apache.cassandra.cql3.CQLStatement;
-import org.apache.cassandra.cql3.QueryProcessor;
+import org.apache.cassandra.cql3.*;
 import org.apache.cassandra.cql3.statements.BatchStatement;
 import org.apache.cassandra.cql3.statements.ModificationStatement;
 import org.apache.cassandra.db.ConsistencyLevel;
@@ -43,7 +41,7 @@ public class BatchMessage extends Message.Request
 {
     public static final Message.Codec<BatchMessage> codec = new Message.Codec<BatchMessage>()
     {
-        public BatchMessage decode(ChannelBuffer body, int version)
+        public BatchMessage decode(ByteBuf body, int version)
         {
             if (version == 1)
                 throw new ProtocolException("BATCH messages are not support in version 1 of the protocol");
@@ -67,7 +65,7 @@ public class BatchMessage extends Message.Request
             return new BatchMessage(toType(type), queryOrIds, variables, consistency);
         }
 
-        public void encode(BatchMessage msg, ChannelBuffer dest, int version)
+        public void encode(BatchMessage msg, ByteBuf dest, int version)
         {
             int queries = msg.queryOrIdList.size();
 
@@ -162,6 +160,7 @@ public class BatchMessage extends Message.Request
                 Tracing.instance.begin("Execute batch of CQL3 queries", Collections.<String, String>emptyMap());
             }
 
+            QueryHandler handler = state.getClientState().getCQLQueryHandler();
             List<ModificationStatement> statements = new ArrayList<ModificationStatement>(queryOrIdList.size());
             for (int i = 0; i < queryOrIdList.size(); i++)
             {
@@ -173,7 +172,7 @@ public class BatchMessage extends Message.Request
                 }
                 else
                 {
-                    statement = QueryProcessor.getPrepared((MD5Digest)query);
+                    statement = handler.getPrepared((MD5Digest)query);
                     if (statement == null)
                         throw new PreparedQueryNotFoundException((MD5Digest)query);
                 }
@@ -203,7 +202,7 @@ public class BatchMessage extends Message.Request
             // Note: It's ok at this point to pass a bogus value for the number of bound terms in the BatchState ctor
             // (and no value would be really correct, so we prefer passing a clearly wrong one).
             BatchStatement batch = new BatchStatement(-1, type, statements, Attributes.none());
-            Message.Response response = QueryProcessor.processBatch(batch, consistency, state, values, queryOrIdList);
+            Message.Response response = handler.processBatch(batch, state, new BatchQueryOptions(consistency, values, queryOrIdList));
 
             if (tracingId != null)
                 response.setTracingId(tracingId);

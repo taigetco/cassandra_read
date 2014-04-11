@@ -214,6 +214,8 @@
             classpath="${build.lib}/antlr-3.2.jar"
             fork="true"
             failonerror="true">
+         <arg value="-Xconversiontimeout" />
+         <arg value="10000" />
          <arg value="${build.src.java}/org/apache/cassandra/cql3/Cql.g" />
          <arg value="-fo" />
          <arg value="${build.src.gen-java}/org/apache/cassandra/cql3/" />
@@ -330,8 +332,8 @@
           <dependency groupId="com.googlecode.concurrentlinkedhashmap" artifactId="concurrentlinkedhashmap-lru" version="1.3"/>
           <dependency groupId="org.antlr" artifactId="antlr" version="3.2"/>
           <dependency groupId="org.slf4j" artifactId="slf4j-api" version="1.7.2"/>
-          <dependency groupId="ch.qos.logback" artifactId="logback-core" version="1.0.13"/>
-          <dependency groupId="ch.qos.logback" artifactId="logback-classic" version="1.0.13"/>
+          <dependency groupId="ch.qos.logback" artifactId="logback-core" version="1.1.12"/>
+          <dependency groupId="ch.qos.logback" artifactId="logback-classic" version="1.1.12"/>
           <dependency groupId="org.codehaus.jackson" artifactId="jackson-core-asl" version="1.9.2"/>
           <dependency groupId="org.codehaus.jackson" artifactId="jackson-mapper-asl" version="1.9.2"/>
           <dependency groupId="jline" artifactId="jline" version="1.0">
@@ -369,6 +371,7 @@
           <dependency groupId="io.netty" artifactId="netty" version="3.6.6.Final" />
           <dependency groupId="com.google.code.findbugs" artifactId="jsr305" version="2.0.2" />
           <dependency groupId="com.clearspring.analytics" artifactId="stream" version="2.5.2" />
+          <dependency groupId="com.datastax.cassandra" artifactId="cassandra-driver-core" version="2.0.1" />
           <dependency groupId="net.sf.supercsv" artifactId="super-csv" version="2.1.0" />
         </dependencyManagement>
         <developer id="alakshman" name="Avinash Lakshman"/>
@@ -400,6 +403,7 @@
       	<dependency groupId="org.apache.hadoop" artifactId="hadoop-minicluster"/>
         <dependency groupId="org.apache.pig" artifactId="pig"/>
       	<dependency groupId="com.google.code.findbugs" artifactId="jsr305"/>
+        <dependency groupId="com.datastax.cassandra" artifactId="cassandra-driver-core"/>
       </artifact:pom>
 
       <artifact:pom id="coverage-deps-pom"
@@ -447,7 +451,6 @@
         <dependency groupId="com.googlecode.json-simple" artifactId="json-simple"/>
         <dependency groupId="com.github.stephenc.high-scale-lib" artifactId="high-scale-lib"/>
         <dependency groupId="org.yaml" artifactId="snakeyaml"/>
-        <dependency groupId="edu.stanford.ppl" artifactId="snaptree"/>
         <dependency groupId="org.mindrot" artifactId="jbcrypt"/>
         <dependency groupId="com.yammer.metrics" artifactId="metrics-core"/>
         <dependency groupId="com.addthis.metrics" artifactId="reporter-config"/>
@@ -465,6 +468,7 @@
         <dependency groupId="org.apache.hadoop" artifactId="hadoop-core" optional="true"/>
         <dependency groupId="org.apache.hadoop" artifactId="hadoop-minicluster" optional="true"/>
         <dependency groupId="org.apache.pig" artifactId="pig" optional="true"/>
+      	<dependency groupId="com.datastax.cassandra" artifactId="cassandra-driver-core" optional="true"/>
 
         <!-- don't need jna to run, but nice to have -->
         <dependency groupId="net.java.dev.jna" artifactId="jna" version="4.0.0"/>
@@ -867,6 +871,10 @@
     <target name="artifacts" depends="jar,javadoc"
             description="Create Cassandra release artifacts">
       <mkdir dir="${dist.dir}"/>
+      <!-- fix the control linefeed so that builds on windows works on linux -->
+      <fixcrlf srcdir="bin" includes="**/*" excludes="**/*.bat" eol="lf" eof="remove" />
+      <fixcrlf srcdir="conf" includes="**/*" excludes="**/*.bat" eol="lf" eof="remove" />
+      <fixcrlf srcdir="tools/bin" includes="**/*" excludes="**/*.bat" eol="lf" eof="remove" />
       <copy todir="${dist.dir}/lib">
         <fileset dir="${build.lib}"/>
         <fileset dir="${build.dir}">
@@ -1086,8 +1094,8 @@
         <pathelement location="${build.dir}/${ant.project.name}-thrift-${version}.jar" />
         <pathelement location="${build.lib}/libthrift-0.9.0.jar" />
         <pathelement location="${build.lib}/slf4j-api-1.7.2.jar" />
-        <pathelement location="${build.lib}/logback-core-1.0.13.jar" />
-        <pathelement location="${build.lib}/logback-classic-1.0.13.jar" />
+        <pathelement location="${build.lib}/logback-core-1.1.12.jar" />
+        <pathelement location="${build.lib}/logback-classic-1.1.12.jar" />
         <pathelement location="${build.lib}/jackson-core-asl-1.9.2.jar" />
         <pathelement location="${build.lib}/jackson-mapper-asl-1.9.2.jar" />
         <fileset dir="${build.dir.lib}">
@@ -1198,7 +1206,7 @@
         <exclude name="**/test/*.class"/>
         <!-- cobertura modifies the serialVersionUID of classes. Some of our unit tests rely on backward
         wire compatability of these classes.  It was easier to exlude them from instrumentation than to
-        force their serialVersinUIDs. -->
+        force their serialVersionUIDs. -->
         <exclude name="**/*Token.class"/>
         <exclude name="${cobertura.excludes}"/>
       </fileset>

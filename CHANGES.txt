@@ -1,9 +1,15 @@
 3.0
+ * Move sstable RandomAccessReader to nio2, which allows using the
+   FILE_SHARE_DELETE flag on Windows (CASSANDRA-4050)
  * Remove CQL2 (CASSANDRA-5918)
- * add Thrift get_multi_slice call (CASSANDRA-6757)
+ * Add Thrift get_multi_slice call (CASSANDRA-6757)
+ * Optimize fetching multiple cells by name (CASSANDRA-6933)
 
 
 2.1.0-beta2
+ * Fix BTree.clear for large updates (CASSANDRA-6943)
+ * Fail write instead of logging a warning when unable to append to CL
+   (CASSANDRA-6764)
  * Eliminate possibility of CL segment appearing twice in active list 
    (CASSANDRA-6557)
  * Apply DONTNEED fadvise to commitlog segments (CASSANDRA-6759)
@@ -27,7 +33,40 @@
  * Fix stress smart Thrift client to pick servers correctly (CASSANDRA-6848)
  * Add logging levels (minimal, normal or verbose) to stress tool (CASSANDRA-6849)
  * Fix race condition in Batch CLE (CASSANDRA-6860)
+ * Improve cleanup/scrub/upgradesstables failure handling (CASSANDRA-6774)
+ * ByteBuffer write() methods for serializing sstables (CASSANDRA-6781)
+ * Proper compare function for CollectionType (CASSANDRA-6783)
+ * Update native server to Netty 4 (CASSANDRA-6236)
+ * Fix off-by-one error in stress (CASSANDRA-6883)
+ * Make OpOrder AutoCloseable (CASSANDRA-6901)
+ * Remove sync repair JMX interface (CASSANDRA-6900)
+ * Add multiple memory allocation options for memtables (CASSANDRA-6689)
+ * Remove adjusted op rate from stress output (CASSANDRA-6921)
+ * Add optimized CF.hasColumns() implementations (CASSANDRA-6941)
+ * Serialize batchlog mutations with the version of the target node
+   (CASSANDRA-6931)
+ * Optimize CounterColumn#reconcile() (CASSANDRA-6953)
+ * Properly remove 1.2 sstable support in 2.1 (CASSANDRA-6869)
+ * Lock counter cells, not partitions (CASSANDRA-6880)
+ * Track presence of legacy counter shards in sstables (CASSANDRA-6888)
+ * Ensure safe resource cleanup when replacing sstables (CASSANDRA-6912)
+ * Add failure handler to async callback (CASSANDRA-6747)
 Merged from 2.0:
+ * Put nodes in hibernate when join_ring is false (CASSANDRA-6961)
+ * Allow compaction of system tables during startup (CASSANDRA-6913)
+ * Restrict Windows to parallel repairs (CASSANDRA-6907)
+ * (Hadoop) Allow manually specifying start/end tokens in CFIF (CASSANDRA-6436)
+ * Fix NPE in MeteredFlusher (CASSANDRA-6820)
+ * Fix race processing range scan responses (CASSANDRA-6820)
+ * Allow deleting snapshots from dropped keyspaces (CASSANDRA-6821)
+ * Add uuid() function (CASSANDRA-6473)
+ * Omit tombstones from schema digests (CASSANDRA-6862)
+ * Include correct consistencyLevel in LWT timeout (CASSANDRA-6884)
+ * Lower chances for losing new SSTables during nodetool refresh and
+   ColumnFamilyStore.loadNewSSTables (CASSANDRA-6514)
+ * Add support for DELETE ... IF EXISTS to CQL3 (CASSANDRA-5708)
+ * Update hadoop_cql3_word_count example (CASSANDRA-6793)
+ * Fix handling of RejectedExecution in sync Thrift server (CASSANDRA-6788)
  * Log more information when exceeding tombstone_warn_threshold (CASSANDRA-6865)
  * Fix truncate to not abort due to unreachable fat clients (CASSANDRA-6864)
  * Fix schema concurrency exceptions (CASSANDRA-6841)
@@ -40,6 +79,42 @@ Merged from 2.0:
  * Restore expiring->deleted (cell) compaction optimization (CASSANDRA-6844)
  * Fix CompactionManager.needsCleanup (CASSANDRA-6845)
  * Correctly compare BooleanType values other than 0 and 1 (CASSANDRA-6779)
+ * Read message id as string from earlier versions (CASSANDRA-6840)
+ * Properly use the Paxos consistency for (non-protocol) batch (CASSANDRA-6837)
+ * Add paranoid disk failure option (CASSANDRA-6646)
+ * Improve PerRowSecondaryIndex performance (CASSANDRA-6876)
+ * Extend triggers to support CAS updates (CASSANDRA-6882)
+ * Static columns with IF NOT EXISTS don't always work as expected (CASSANDRA-6873)
+ * Fix paging with SELECT DISTINCT (CASSANDRA-6857)
+ * Fix UnsupportedOperationException on CAS timeout (CASSANDRA-6923)
+ * Improve MeteredFlusher handling of MF-unaffected column families
+   (CASSANDRA-6867)
+ * Add CqlRecordReader using native pagination (CASSANDRA-6311)
+ * Add QueryHandler interface (CASSANDRA-6659)
+ * Track liveRatio per-memtable, not per-CF (CASSANDRA-6945)
+ * Make sure upgradesstables keeps sstable level (CASSANDRA-6958)
+ * Fix LIMT with static columns (CASSANDRA-6956)
+ * Fix clash with CQL column name in thrift validation (CASSANDRA-6892)
+ * Fix error with super columns in mixed 1.2-2.0 clusters (CASSANDRA-6966)
+ * Fix bad skip of sstables on slice query with composite start/finish (CASSANDRA-6825)
+ * Fix unintended update with conditional statement (CASSANDRA-6893)
+ * Fix map element access in IF (CASSANDRA-6914)
+ * Avoid costly range calculations for range queries on system keyspaces
+   (CASSANDRA-6906)
+ * Fix SSTable not released if stream session fails (CASSANDRA-6818)
+ * Avoid build failure due to ANTLR timeout (CASSANDRA-6991)
+Merged from 1.2:
+ * Add UNLOGGED, COUNTER options to BATCH documentation (CASSANDRA-6816)
+ * add extra SSL cipher suites (CASSANDRA-6613)
+ * fix nodetool getsstables for blob PK (CASSANDRA-6803)
+ * Fix BatchlogManager#deleteBatch() use of millisecond timsestamps
+   (CASSANDRA-6822)
+ * Continue assassinating even if the endpoint vanishes (CASSANDRA-6787)
+ * Schedule schema pulls on change (CASSANDRA-6971)
+ * Non-droppable verbs shouldn't be dropped from OTC (CASSANDRA-6980)
+
+
+2.0.6
  * Avoid race-prone second "scrub" of system keyspace (CASSANDRA-6797)
  * Pool CqlRecordWriter clients by inetaddress rather than Range 
    (CASSANDRA-6665)
@@ -87,6 +162,8 @@ Merged from 2.0:
  * Restore expiring->deleted (cell) compaction optimization (CASSANDRA-6844)
  * Fix CompactionManager.needsCleanup (CASSANDRA-6845)
  * Correctly compare BooleanType values other than 0 and 1 (CASSANDRA-6779)
+ * Read message id as string from earlier versions (CASSANDRA-6840)
+ * Properly use the Paxos consistency for (non-protocol) batch (CASSANDRA-6837)
 
 
 2.1.0-beta1
@@ -281,7 +358,7 @@ Merged from 1.2:
 2.0.2
  * Update FailureDetector to use nanontime (CASSANDRA-4925)
  * Fix FileCacheService regressions (CASSANDRA-6149)
- * Never return WriteTimeout for CL.ANY (CASSANDRA-6032)
+ * Never return WriteTimeout for CL.ANY (CASSANDRA-6132)
  * Fix race conditions in bulk loader (CASSANDRA-6129)
  * Add configurable metrics reporting (CASSANDRA-4430)
  * drop queries exceeding a configurable number of tombstones (CASSANDRA-6117)

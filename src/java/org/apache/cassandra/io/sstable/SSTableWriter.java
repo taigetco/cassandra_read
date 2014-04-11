@@ -201,9 +201,9 @@ public class SSTableWriter extends SSTable
         sstableMetadataCollector.update(dataFile.getFilePointer() - startPosition, cf.getColumnStats());
     }
 
-    public static RowIndexEntry rawAppend(ColumnFamily cf, long startPosition, DecoratedKey key, DataOutput out) throws IOException
+    public static RowIndexEntry rawAppend(ColumnFamily cf, long startPosition, DecoratedKey key, DataOutputPlus out) throws IOException
     {
-        assert cf.getColumnCount() > 0 || cf.isMarkedForDelete();
+        assert cf.hasColumns() || cf.isMarkedForDelete();
 
         ColumnIndex.Builder builder = new ColumnIndex.Builder(cf, key.key, out);
         ColumnIndex index = builder.build(cf);
@@ -227,20 +227,12 @@ public class SSTableWriter extends SSTable
         List<ByteBuffer> minColumnNames = Collections.emptyList();
         List<ByteBuffer> maxColumnNames = Collections.emptyList();
         StreamingHistogram tombstones = new StreamingHistogram(TOMBSTONE_HISTOGRAM_BIN_SIZE);
+        boolean hasLegacyCounterShards = false;
+
         ColumnFamily cf = ArrayBackedSortedColumns.factory.create(metadata);
-
-        // skip row size for version < ja
-        if (version.hasRowSizeAndColumnCount)
-            FileUtils.skipBytesFully(in, 8);
-
         cf.delete(DeletionTime.serializer.deserialize(in));
 
         ColumnIndex.Builder columnIndexer = new ColumnIndex.Builder(cf, key.key, dataFile.stream);
-
-        // read column count for version < ja
-        int columnCount = Integer.MAX_VALUE;
-        if (version.hasRowSizeAndColumnCount)
-            columnCount = in.readInt();
 
         if (cf.deletionInfo().getTopLevelDeletion().localDeletionTime < Integer.MAX_VALUE)
             tombstones.update(cf.deletionInfo().getTopLevelDeletion().localDeletionTime);
@@ -252,7 +244,7 @@ public class SSTableWriter extends SSTable
             tombstones.update(rangeTombstone.getLocalDeletionTime());
         }
 
-        Iterator<OnDiskAtom> iter = metadata.getOnDiskIterator(in, columnCount, ColumnSerializer.Flag.PRESERVE_SIZE, Integer.MIN_VALUE, version);
+        Iterator<OnDiskAtom> iter = metadata.getOnDiskIterator(in, ColumnSerializer.Flag.PRESERVE_SIZE, Integer.MIN_VALUE, version);
         try
         {
             while (iter.hasNext())
@@ -262,16 +254,18 @@ public class SSTableWriter extends SSTable
                 OnDiskAtom atom = iter.next();
                 if (atom == null)
                     break;
+
                 if (atom instanceof CounterCell)
+                {
                     atom = ((CounterCell) atom).markLocalToBeCleared();
+                    hasLegacyCounterShards = hasLegacyCounterShards || ((CounterCell) atom).hasLegacyShards();
+                }
 
                 int deletionTime = atom.getLocalDeletionTime();
                 if (deletionTime < Integer.MAX_VALUE)
-                {
                     tombstones.update(deletionTime);
-                }
-                minTimestamp = Math.min(minTimestamp, atom.minTimestamp());
-                maxTimestamp = Math.max(maxTimestamp, atom.maxTimestamp());
+                minTimestamp = Math.min(minTimestamp, atom.timestamp());
+                maxTimestamp = Math.max(maxTimestamp, atom.timestamp());
                 minColumnNames = ColumnNameHelper.minComponents(minColumnNames, atom.name(), metadata.comparator);
                 maxColumnNames = ColumnNameHelper.maxComponents(maxColumnNames, atom.name(), metadata.comparator);
                 maxLocalDeletionTime = Math.max(maxLocalDeletionTime, atom.getLocalDeletionTime());
@@ -287,14 +281,15 @@ public class SSTableWriter extends SSTable
             throw new FSWriteError(e, dataFile.getPath());
         }
 
-        sstableMetadataCollector.updateMinTimestamp(minTimestamp);
-        sstableMetadataCollector.updateMaxTimestamp(maxTimestamp);
-        sstableMetadataCollector.updateMaxLocalDeletionTime(maxLocalDeletionTime);
-        sstableMetadataCollector.addRowSize(dataFile.getFilePointer() - currentPosition);
-        sstableMetadataCollector.addColumnCount(columnIndexer.writtenAtomCount());
-        sstableMetadataCollector.mergeTombstoneHistogram(tombstones);
-        sstableMetadataCollector.updateMinColumnNames(minColumnNames);
-        sstableMetadataCollector.updateMaxColumnNames(maxColumnNames);
+        sstableMetadataCollector.updateMinTimestamp(minTimestamp)
+                                .updateMaxTimestamp(maxTimestamp)
+                                .updateMaxLocalDeletionTime(maxLocalDeletionTime)
+                                .addRowSize(dataFile.getFilePointer() - currentPosition)
+                                .addColumnCount(columnIndexer.writtenAtomCount())
+                                .mergeTombstoneHistogram(tombstones)
+                                .updateMinColumnNames(minColumnNames)
+                                .updateMaxColumnNames(maxColumnNames)
+                                .updateHasLegacyCounterShards(hasLegacyCounterShards);
         afterAppend(key, currentPosition, RowIndexEntry.create(currentPosition, cf.deletionInfo().getTopLevelDeletion(), columnIndexer.build()));
         return currentPosition;
     }
@@ -319,6 +314,16 @@ public class SSTableWriter extends SSTable
             logger.error(String.format("Failed deleting temp components for %s", descriptor), e);
             throw e;
         }
+    }
+
+    // we use this method to ensure any managed data we may have retained references to during the write are no
+    // longer referenced, so that we do not need to enclose the expensive call to closeAndOpenReader() in a transaction
+    public void isolateReferences()
+    {
+        // currently we only maintain references to first/last/lastWrittenKey from the data provided; all other
+        // data retention is done through copying
+        first = getMinimalKey(first);
+        last = lastWrittenKey = getMinimalKey(last);
     }
 
     public SSTableReader closeAndOpenReader()
@@ -489,7 +494,7 @@ public class SSTableWriter extends SSTable
                 {
                     // bloom filter
                     FileOutputStream fos = new FileOutputStream(path);
-                    DataOutputStream stream = new DataOutputStream(fos);
+                    DataOutputStreamAndChannel stream = new DataOutputStreamAndChannel(fos);
                     FilterFactory.serialize(bf, stream);
                     stream.flush();
                     fos.getFD().sync();

@@ -17,7 +17,12 @@
  */
 package org.apache.cassandra.db;
 
-import java.util.*;
+import java.util.AbstractCollection;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.Iterator;
+import java.util.List;
 
 import com.google.common.base.Function;
 import com.google.common.collect.AbstractIterator;
@@ -29,6 +34,8 @@ import org.apache.cassandra.db.composites.CellName;
 import org.apache.cassandra.db.composites.CellNameType;
 import org.apache.cassandra.db.composites.Composite;
 import org.apache.cassandra.db.filter.ColumnSlice;
+import org.apache.cassandra.utils.memory.AbstractAllocator;
+import org.apache.cassandra.utils.SearchIterator;
 
 /**
  * A ColumnFamily backed by an array.
@@ -54,19 +61,19 @@ public class ArrayBackedSortedColumns extends ColumnFamily
     {
         public ArrayBackedSortedColumns create(CFMetaData metadata, boolean insertReversed, int initialCapacity)
         {
-            return new ArrayBackedSortedColumns(metadata, insertReversed, initialCapacity);
+            return new ArrayBackedSortedColumns(metadata, insertReversed, initialCapacity == 0 ? EMPTY_ARRAY : new Cell[initialCapacity], 0, 0);
         }
     };
 
-    private ArrayBackedSortedColumns(CFMetaData metadata, boolean reversed, int initialCapacity)
+    private ArrayBackedSortedColumns(CFMetaData metadata, boolean reversed, Cell[] cells, int size, int sortedSize)
     {
         super(metadata);
         this.reversed = reversed;
         this.deletionInfo = DeletionInfo.live();
-        this.cells = initialCapacity == 0 ? EMPTY_ARRAY : new Cell[initialCapacity];
-        this.size = 0;
-        this.sortedSize = 0;
-        this.isSorted = true;
+        this.cells = cells;
+        this.size = size;
+        this.sortedSize = sortedSize;
+        this.isSorted = size == sortedSize;
     }
 
     private ArrayBackedSortedColumns(ArrayBackedSortedColumns original)
@@ -78,6 +85,16 @@ public class ArrayBackedSortedColumns extends ColumnFamily
         this.size = original.size;
         this.sortedSize = original.sortedSize;
         this.isSorted = original.isSorted;
+    }
+
+    public static ArrayBackedSortedColumns localCopy(ColumnFamily original, AbstractAllocator allocator)
+    {
+        ArrayBackedSortedColumns copy = new ArrayBackedSortedColumns(original.metadata, false, new Cell[original.getColumnCount()], 0, 0);
+        for (Cell cell : original)
+            copy.internalAdd(cell.localCopy(allocator));
+        copy.sortedSize = copy.size; // internalAdd doesn't update sortedSize.
+        copy.delete(original);
+        return copy;
     }
 
     public ColumnFamily.Factory getFactory()
@@ -232,7 +249,7 @@ public class ArrayBackedSortedColumns extends ColumnFamily
     {
         delete(other.deletionInfo());
 
-        if (other.getColumnCount() == 0)
+        if (!other.hasColumns())
             return;
 
         // In reality, with ABSC being the only remaining container (aside from ABTC), other will aways be ABSC.
@@ -349,6 +366,11 @@ public class ArrayBackedSortedColumns extends ColumnFamily
         return size;
     }
 
+    public boolean hasColumns()
+    {
+        return size > 0;
+    }
+
     public void clear()
     {
         setDeletionInfo(DeletionInfo.live());
@@ -414,6 +436,59 @@ public class ArrayBackedSortedColumns extends ColumnFamily
     {
         maybeSortCells();
         return new SlicesIterator(Arrays.asList(cells).subList(0, size), getComparator(), slices, !reversed);
+    }
+
+    public SearchIterator<CellName, Cell> searchIterator()
+    {
+        maybeSortCells();
+
+        return new SearchIterator<CellName, Cell>()
+        {
+            // the first index that we could find the next key at, i.e. one larger
+            // than the last key's location
+            private int i = 0;
+
+            // We assume a uniform distribution of keys,
+            // so we keep track of how many keys were skipped to satisfy last lookup, and only look at twice that
+            // many keys for next lookup initially, extending to whole range only if we couldn't find it in that subrange
+            private int range = size / 2;
+
+            public boolean hasNext()
+            {
+                return i < size;
+            }
+
+            public Cell next(CellName name)
+            {
+                if (!isSorted || !hasNext())
+                    throw new IllegalStateException();
+
+                // optimize for runs of sequential matches, as in CollationController
+                // checking to see if we've found the desired cells yet (CASSANDRA-6933)
+                int c = metadata.comparator.compare(name, cells[i].name());
+                if (c <= 0)
+                    return c < 0 ? null : cells[i++];
+
+                // use range to manually force a better bsearch "pivot" by breaking it into two calls:
+                // first for i..i+range, then i+range..size if necessary.
+                // https://issues.apache.org/jira/browse/CASSANDRA-6933?focusedCommentId=13958264&page=com.atlassian.jira.plugin.system.issuetabpanels:comment-tabpanel#comment-13958264
+                int limit = Math.min(size, i + range);
+                int i2 = binarySearch(i + 1, limit, name, internalComparator());
+                if (-1 - i2 == limit)
+                    i2 = binarySearch(limit, size, name, internalComparator());
+                // i2 can't be zero since we already checked cells[i] above
+                if (i2 > 0)
+                {
+                    range = i2 - i;
+                    i = i2 + 1;
+                    return cells[i2];
+                }
+                i2 = -1 - i2;
+                range = i2 - i;
+                i = i2;
+                return null;
+            }
+        };
     }
 
     private static class SlicesIterator extends AbstractIterator<Cell>

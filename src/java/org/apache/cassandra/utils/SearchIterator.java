@@ -15,24 +15,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.cassandra.cql3.hooks;
+package org.apache.cassandra.utils;
 
-import org.apache.cassandra.cql3.CQLStatement;
-import org.apache.cassandra.exceptions.RequestValidationException;
-
-/**
- * Run directly after a CQL Statement is prepared in
- * {@link org.apache.cassandra.cql3.QueryProcessor}.
- */
-public interface PostPreparationHook
+public interface SearchIterator<K, V>
 {
-    /**
-     * Called in QueryProcessor, once a CQL statement has been prepared.
-     *
-     * @param statement the statement to perform additional processing on
-     * @param context preparation context containing additional info
-     *                about the operation and statement
-     * @throws RequestValidationException
-     */
-    void processStatement(CQLStatement statement, PreparationContext context) throws RequestValidationException;
+
+    public boolean hasNext();
+    public V next(K key);
+
 }

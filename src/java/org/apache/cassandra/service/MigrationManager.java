@@ -18,7 +18,6 @@
 package org.apache.cassandra.service;
 
 import java.io.DataInput;
-import java.io.DataOutput;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.util.*;
@@ -45,6 +44,7 @@ import org.apache.cassandra.exceptions.AlreadyExistsException;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.gms.*;
 import org.apache.cassandra.io.IVersionedSerializer;
+import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.net.MessageOut;
 import org.apache.cassandra.net.MessagingService;
 import org.apache.cassandra.utils.FBUtilities;
@@ -89,11 +89,15 @@ public class MigrationManager
     private static void maybeScheduleSchemaPull(final UUID theirVersion, final InetAddress endpoint)
     {
         if ((Schema.instance.getVersion() != null && Schema.instance.getVersion().equals(theirVersion)) || !shouldPullSchemaFrom(endpoint))
+        {
+            logger.debug("Not pulling schema because versions match or shouldPullSchemaFrom returned false");
             return;
+        }
 
         if (Schema.emptyVersion.equals(Schema.instance.getVersion()) || runtimeMXBean.getUptime() < MIGRATION_DELAY_IN_MS)
         {
             // If we think we may be bootstrapping or have recently started, submit MigrationTask immediately
+            logger.debug("Submitting migration task for {}", endpoint);
             submitMigrationTask(endpoint);
         }
         else
@@ -107,12 +111,18 @@ public class MigrationManager
                     // grab the latest version of the schema since it may have changed again since the initial scheduling
                     EndpointState epState = Gossiper.instance.getEndpointStateForEndpoint(endpoint);
                     if (epState == null)
+                    {
+                        logger.debug("epState vanished for {}, not submitting migration task", endpoint);
                         return;
+                    }
                     VersionedValue value = epState.getApplicationState(ApplicationState.SCHEMA);
                     UUID currentVersion = UUID.fromString(value.value);
                     if (Schema.instance.getVersion().equals(currentVersion))
+                    {
+                        logger.debug("not submitting migration task for {} because our versions match", endpoint);
                         return;
-
+                    }
+                    logger.debug("submitting migration task for {}", endpoint);
                     submitMigrationTask(endpoint);
                 }
             };
@@ -372,7 +382,7 @@ public class MigrationManager
     {
         public static MigrationsSerializer instance = new MigrationsSerializer();
 
-        public void serialize(Collection<Mutation> schema, DataOutput out, int version) throws IOException
+        public void serialize(Collection<Mutation> schema, DataOutputPlus out, int version) throws IOException
         {
             out.writeInt(schema.size());
             for (Mutation mutation : schema)

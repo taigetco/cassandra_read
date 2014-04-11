@@ -30,6 +30,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.db.index.SecondaryIndexManager;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.service.MigrationManager;
 import org.apache.cassandra.utils.ConcurrentBiMap;
@@ -355,6 +356,9 @@ public class Schema
                 if (invalidSchemaRow(row) || ignoredSchemaRow(row))
                     continue;
 
+                // we want to digest only live columns
+                ColumnFamilyStore.removeDeletedColumnsOnly(row.cf, Integer.MAX_VALUE, SecondaryIndexManager.nullUpdater);
+                row.cf.purgeTombstones(Integer.MAX_VALUE);
                 row.cf.updateDigest(versionDigest);
             }
 
@@ -394,7 +398,7 @@ public class Schema
 
     public static boolean invalidSchemaRow(Row row)
     {
-        return row.cf == null || (row.cf.isMarkedForDelete() && row.cf.getColumnCount() == 0);
+        return row.cf == null || (row.cf.isMarkedForDelete() && !row.cf.hasColumns());
     }
 
     public static boolean ignoredSchemaRow(Row row)
