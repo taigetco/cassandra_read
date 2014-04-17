@@ -18,7 +18,6 @@
 package org.apache.cassandra.io.sstable;
 
 import java.io.BufferedInputStream;
-import java.io.Closeable;
 import java.io.DataInputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -90,6 +89,8 @@ import org.apache.cassandra.io.sstable.metadata.MetadataComponent;
 import org.apache.cassandra.io.sstable.metadata.MetadataType;
 import org.apache.cassandra.io.sstable.metadata.StatsMetadata;
 import org.apache.cassandra.io.sstable.metadata.ValidationMetadata;
+import org.apache.cassandra.io.util.BufferedSegmentedFile;
+import org.apache.cassandra.io.util.CompressedSegmentedFile;
 import org.apache.cassandra.io.util.DataOutputStreamAndChannel;
 import org.apache.cassandra.io.util.FileDataInput;
 import org.apache.cassandra.io.util.FileUtils;
@@ -117,7 +118,7 @@ import static org.apache.cassandra.db.Directories.SECONDARY_INDEX_NAME_SEPARATOR
  * SSTableReaders are open()ed by Keyspace.onStart; after that they are created by SSTableWriter.renameAndOpen.
  * Do not re-call open() on existing SSTable files; use the references kept by ColumnFamilyStore post-start instead.
  */
-public class SSTableReader extends SSTable implements Closeable
+public class SSTableReader extends SSTable
 {
     private static final Logger logger = LoggerFactory.getLogger(SSTableReader.class);
 
@@ -336,10 +337,10 @@ public class SSTableReader extends SSTable implements Closeable
                                                   statsMetadata);
 
         // special implementation of load to use non-pooled SegmentedFile builders
-        SegmentedFile.Builder ibuilder = SegmentedFile.getBuilder(DatabaseDescriptor.getIndexAccessMode());
+        SegmentedFile.Builder ibuilder = new BufferedSegmentedFile.Builder();
         SegmentedFile.Builder dbuilder = sstable.compression
-                                       ? SegmentedFile.getCompressedBuilder()
-                                       : SegmentedFile.getBuilder(DatabaseDescriptor.getDiskAccessMode());
+                                       ? new CompressedSegmentedFile.Builder()
+                                       : new BufferedSegmentedFile.Builder();
         if (!sstable.loadSummary(ibuilder, dbuilder))
             sstable.buildSummary(false, ibuilder, dbuilder, false, Downsampling.BASE_SAMPLING_LEVEL);
         sstable.ifile = ibuilder.complete(sstable.descriptor.filenameFor(Component.PRIMARY_INDEX));
@@ -546,7 +547,10 @@ public class SSTableReader extends SSTable implements Closeable
         if (readMeterSyncFuture != null)
             readMeterSyncFuture.cancel(false);
 
-        assert references.get() == 0;
+        if (references.get() != 0)
+        {
+            throw new IllegalStateException("SSTable is not fully released (" + references.get() + " references)");
+        }
 
         synchronized (replaceLock)
         {
@@ -589,7 +593,10 @@ public class SSTableReader extends SSTable implements Closeable
                     replacedBy.replaces = replaces;
             }
 
-            assert references.get() == 0;
+            if (references.get() != 0)
+            {
+                throw new IllegalStateException("SSTable is not fully released (" + references.get() + " references)");
+            }
             if (closeBf)
                 bf.close();
             if (closeSummary)
@@ -612,14 +619,6 @@ public class SSTableReader extends SSTable implements Closeable
                 deletingTask.schedule();
             }
         }
-    }
-
-    /**
-     * Schedule clean-up of resources
-     */
-    public void close()
-    {
-        tidy(false);
     }
 
     public String getFilename()
@@ -799,7 +798,7 @@ public class SSTableReader extends SSTable implements Closeable
         }
         catch (IOException e)
         {
-            logger.debug("Cannot deserialize SSTable {} Summary: {}", toString(), e.getMessage());
+            logger.debug("Cannot deserialize SSTable Summary File {}: {}", summariesFile.getPath(), e.getMessage());
             // corrupted; delete it and fall back to creating a new summary
             FileUtils.closeQuietly(iStream);
             // delete it and fall back to creating a new summary

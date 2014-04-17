@@ -30,6 +30,7 @@ import javax.management.*;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
+import com.google.common.base.Predicate;
 import com.google.common.collect.*;
 import com.google.common.util.concurrent.*;
 import com.google.common.util.concurrent.Futures;
@@ -2153,6 +2154,11 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     public void snapshotWithoutFlush(String snapshotName)
     {
+        snapshotWithoutFlush(snapshotName, null);
+    }
+
+    public void snapshotWithoutFlush(String snapshotName, Predicate<SSTableReader> predicate)
+    {
         for (ColumnFamilyStore cfs : concatWithIndexes())
         {
             DataTracker.View currentView = cfs.markCurrentViewReferenced();
@@ -2161,6 +2167,11 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             {
                 for (SSTableReader ssTable : currentView.sstables)
                 {
+                    if (predicate != null && !predicate.apply(ssTable))
+                    {
+                        continue;
+                    }
+
                     File snapshotDirectory = Directories.getSnapshotDirectory(ssTable.descriptor, snapshotName);
                     ssTable.createLinks(snapshotDirectory.getPath()); // hard links
                     if (logger.isDebugEnabled())
@@ -2190,8 +2201,13 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
      */
     public void snapshot(String snapshotName)
     {
+        snapshot(snapshotName, null);
+    }
+
+    public void snapshot(String snapshotName, Predicate<SSTableReader> predicate)
+    {
         forceBlockingFlush();
-        snapshotWithoutFlush(snapshotName);
+        snapshotWithoutFlush(snapshotName, predicate);
     }
 
     public boolean snapshotExists(String snapshotName)
@@ -2326,22 +2342,37 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
 
     public Iterable<DecoratedKey> keySamples(Range<Token> range)
     {
-        Collection<SSTableReader> sstables = getSSTables();
-        Iterable<DecoratedKey>[] samples = new Iterable[sstables.size()];
-        int i = 0;
-        for (SSTableReader sstable: sstables)
+        Collection<SSTableReader> sstables = markCurrentSSTablesReferenced();
+        try
         {
-            samples[i++] = sstable.getKeySamples(range);
+            Iterable<DecoratedKey>[] samples = new Iterable[sstables.size()];
+            int i = 0;
+            for (SSTableReader sstable: sstables)
+            {
+                samples[i++] = sstable.getKeySamples(range);
+            }
+            return Iterables.concat(samples);
         }
-        return Iterables.concat(samples);
+        finally
+        {
+            SSTableReader.releaseReferences(sstables);
+        }
     }
 
     public long estimatedKeysForRange(Range<Token> range)
     {
-        long count = 0;
-        for (SSTableReader sstable : getSSTables())
-            count += sstable.estimatedKeysForRanges(Collections.singleton(range));
-        return count;
+        Collection<SSTableReader> sstables = markCurrentSSTablesReferenced();
+        try
+        {
+            long count = 0;
+            for (SSTableReader sstable : sstables)
+                count += sstable.estimatedKeysForRanges(Collections.singleton(range));
+            return count;
+        }
+        finally
+        {
+            SSTableReader.releaseReferences(sstables);
+        }
     }
 
     /**
