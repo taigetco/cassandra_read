@@ -44,14 +44,17 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 /** A <code>CREATE TABLE</code> parsed from a CQL query statement. */
 public class CreateTableStatement extends SchemaAlteringStatement
 {
+	//clustering keys comparator or UTF8 or CompositeKey
     public CellNameType comparator;
     private AbstractType<?> defaultValidator;
     private AbstractType<?> keyValidator;
-
+    //partition keys which are first columns in primary keys
     private final List<ByteBuffer> keyAliases = new ArrayList<ByteBuffer>();
+    //clustering keys, which are primary keys exception partition keys
     private final List<ByteBuffer> columnAliases = new ArrayList<ByteBuffer>();
+    //clustering key name(the clustering key is only one, and compact storage), or empty buffer(compact storage, only primary key), or null 
     private ByteBuffer valueAlias;
-
+    // contain all columns not including primary key
     private final Map<ColumnIdentifier, AbstractType> columns = new HashMap<ColumnIdentifier, AbstractType>();
     private final Set<ColumnIdentifier> staticColumns;
     private final CFPropDefs properties;

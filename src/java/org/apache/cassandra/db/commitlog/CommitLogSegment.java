@@ -50,6 +50,13 @@ import org.apache.cassandra.utils.PureJavaCrc32;
 import org.apache.cassandra.utils.concurrent.OpOrder;
 import org.apache.cassandra.utils.concurrent.WaitQueue;
 
+/**
+ * cfDirty记录每个mutation, 在MemoryMappedBuffer中开始位置(start position),
+ * cfClean记录每个MemoryMappedBuffer当前位置
+ * ，也即每个Mutation在cfClean中的位置肯定大于相同的Mutation存储在cfDirty中的位置
+ * ，因为每个Mutation首先会存储在cfDirty，然后在移到cfClean,
+ * 此时allocatePosition已经向前移动，最后会从cfDirty删除之前存储在cfDirty中的Mutation
+ */
 /*
  * A single commit log file on disk. Manages creation of the file and writing mutations to disk,
  * as well as tracking the last mutation position of any "dirty" CFs covered by the segment file. Segment
@@ -70,7 +77,8 @@ public class CommitLogSegment
 
     // The OpOrder used to order appends wrt sync
     private final OpOrder appendOrder = new OpOrder();
-
+    
+    //记录当前segment已被写入的长度
     private final AtomicInteger allocatePosition = new AtomicInteger();
 
     // Everything before this offset has been synced and written.  The SYNC_MARKER_SIZE bytes after

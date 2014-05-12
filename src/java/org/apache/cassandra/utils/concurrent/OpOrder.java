@@ -151,6 +151,7 @@ public class OpOrder
 
         private volatile Group prev, next;
         private final long id; // monotonically increasing id for compareTo()
+        //当前运行的Operations的数量，小于0表示已经过期, 当前还在运行的Operations的数量为 -(running + 1)
         private volatile int running = 0; // number of operations currently running.  < 0 means we're expired, and the count of tasks still running is -(running + 1)
         private volatile boolean isBlocking; // indicates running operations are blocking future barriers
         private final WaitQueue isBlockingSignal = new WaitQueue(); // signal to wait on to indicate isBlocking is true
@@ -394,6 +395,7 @@ public class OpOrder
         }
 
         /**
+         * 等待所有在发出(issue)barrier之前的操作(operations)全部完成
          * wait for all operations started prior to issuing the barrier to complete
          */
         public void await()

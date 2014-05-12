@@ -534,12 +534,15 @@ public class DataTracker
     public static class View
     {
         /**
+         * 通常大小都是一的列表(list), 但是当准备flushing时，它同时包括要被flushing的memtable和新的替代之前的memtable, 
+         * 直到所有在就表上未完成的写操作完成。列表中的最后一个memtable就是当前的memtable
          * ordinarily a list of size 1, but when preparing to flush will contain both the memtable we will flush
          * and the new replacement memtable, until all outstanding write operations on the old table complete.
          * The last item in the list is always the "current" memtable.
          */
         private final List<Memtable> liveMemtables;
         /**
+         * 包括所有的memtables等待被flush, 这些memtables都不能被写，按时间升序排列。
          * contains all memtables that are no longer referenced for writing and are queued for / in the process of being
          * flushed. In chronologically ascending order.
          */
@@ -600,7 +603,9 @@ public class DataTracker
             List<Memtable> newLiveMemtables = ImmutableList.<Memtable>builder().addAll(liveMemtables).add(newMemtable).build();
             return new View(newLiveMemtables, flushingMemtables, sstables, compacting, intervalTree);
         }
-
+        /**
+         * 从liveMemtables删除toFlushMemtable，同时将toFlushMemtable按照创建时间顺序(creationTime)加入flushingMemtables
+         */
         View markFlushing(Memtable toFlushMemtable)
         {
             List<Memtable> live = liveMemtables, flushing = flushingMemtables;

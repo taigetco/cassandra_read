@@ -261,8 +261,7 @@ public class CassandraDaemon
         // initialize keyspaces
         for (String keyspaceName : Schema.instance.getKeyspaces())
         {
-            if (logger.isDebugEnabled())
-                logger.debug("opening keyspace {}", keyspaceName);
+        	logger.debug("opening keyspace {}", keyspaceName);
             // disable auto compaction until commit log replay ends
             for (ColumnFamilyStore cfs : Keyspace.open(keyspaceName).getColumnFamilyStores())
             {

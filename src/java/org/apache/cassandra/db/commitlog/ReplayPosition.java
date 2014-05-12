@@ -61,7 +61,6 @@ public class ReplayPosition implements Comparable<ReplayPosition>
         return ordering.max(Iterables.transform(sstables, f));
     }
 
-
     public final long segment;
     public final int position;
 
