@@ -50,7 +50,6 @@ public abstract class RowPosition implements RingPosition<RowPosition>
         return key == null || key.remaining() == 0 ? p.getMinimumToken().minKeyBound() : p.decorateKey(key);
     }
 
-    public abstract Token getToken();
     public abstract Kind kind();
 
     public boolean isMinimum()

@@ -600,7 +600,9 @@ public class DataTracker
             List<Memtable> newLiveMemtables = ImmutableList.<Memtable>builder().addAll(liveMemtables).add(newMemtable).build();
             return new View(newLiveMemtables, flushingMemtables, sstables, compacting, intervalTree);
         }
-
+        /**
+         * 从liveMemtables删除toFlushMemtable，同时将toFlushMemtable按照创建时间顺序(creationTime)加入flushingMemtables
+         */
         View markFlushing(Memtable toFlushMemtable)
         {
             List<Memtable> live = liveMemtables, flushing = flushingMemtables;

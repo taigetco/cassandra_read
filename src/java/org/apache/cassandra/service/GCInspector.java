@@ -114,7 +114,7 @@ public class GCInspector
             long durationPerCollection = duration / (count - previousCount);
             if (durationPerCollection > MIN_DURATION)
                 logger.info(st);
-            else if (logger.isDebugEnabled())
+            else
                 logger.debug(st);
 
             if (durationPerCollection > MIN_DURATION_TPSTATS)
