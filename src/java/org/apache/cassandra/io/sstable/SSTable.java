@@ -83,9 +83,8 @@ public abstract class SSTable
         assert partitioner != null;
 
         this.descriptor = descriptor;
-        Set<Component> dataComponents = new HashSet<>(components);
-        this.compression = dataComponents.contains(Component.COMPRESSION_INFO);
-        this.components = new CopyOnWriteArraySet<>(dataComponents);
+        this.compression = components.contains(Component.COMPRESSION_INFO);
+        this.components = new CopyOnWriteArraySet<>(components);
         this.metadata = metadata;
         this.partitioner = partitioner;
     }
