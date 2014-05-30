@@ -22,15 +22,26 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
-import java.util.*;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
+import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
+import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 
 import com.google.common.base.Function;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.io.util.FileUtils;
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.junit.Test;
@@ -41,29 +52,55 @@ import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ColumnDefinition;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.IndexType;
 import org.apache.cassandra.config.Schema;
-import org.apache.cassandra.db.composites.*;
 import org.apache.cassandra.db.columniterator.IdentityQueryFilter;
-import org.apache.cassandra.db.filter.*;
+import org.apache.cassandra.db.composites.CellName;
+import org.apache.cassandra.db.composites.CellNameType;
+import org.apache.cassandra.db.composites.CellNames;
+import org.apache.cassandra.db.composites.Composites;
 import org.apache.cassandra.db.filter.ColumnSlice;
+import org.apache.cassandra.db.filter.IDiskAtomFilter;
+import org.apache.cassandra.db.filter.NamesQueryFilter;
+import org.apache.cassandra.db.filter.QueryFilter;
+import org.apache.cassandra.db.filter.SliceQueryFilter;
 import org.apache.cassandra.db.index.SecondaryIndex;
 import org.apache.cassandra.db.marshal.LexicalUUIDType;
 import org.apache.cassandra.db.marshal.LongType;
-import org.apache.cassandra.dht.*;
-import org.apache.cassandra.io.sstable.*;
+import org.apache.cassandra.dht.Bounds;
+import org.apache.cassandra.dht.ExcludingBounds;
+import org.apache.cassandra.dht.IPartitioner;
+import org.apache.cassandra.dht.IncludingExcludingBounds;
+import org.apache.cassandra.dht.Range;
+import org.apache.cassandra.io.sstable.Component;
+import org.apache.cassandra.io.sstable.Descriptor;
+import org.apache.cassandra.io.sstable.SSTableDeletingTask;
+import org.apache.cassandra.io.sstable.SSTableReader;
+import org.apache.cassandra.io.sstable.SSTableSimpleWriter;
+import org.apache.cassandra.io.sstable.SSTableWriter;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
+import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.service.ActiveRepairService;
 import org.apache.cassandra.service.StorageService;
-import org.apache.cassandra.thrift.*;
+import org.apache.cassandra.thrift.SlicePredicate;
+import org.apache.cassandra.thrift.SliceRange;
+import org.apache.cassandra.thrift.ThriftValidation;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.WrappedRunnable;
 
-import static org.junit.Assert.*;
-import static org.apache.cassandra.Util.*;
+import static org.apache.cassandra.Util.cellname;
+import static org.apache.cassandra.Util.column;
+import static org.apache.cassandra.Util.dk;
+import static org.apache.cassandra.Util.rp;
 import static org.apache.cassandra.utils.ByteBufferUtil.bytes;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
 
 @RunWith(OrderedJUnit4ClassRunner.class)
 public class ColumnFamilyStoreTest extends SchemaLoader
@@ -165,7 +202,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
                                              Util.namesFilter(cfs, "asdf"),
                                              10);
         assertEquals(1, result.size());
-        assert result.get(0).key.key.equals(ByteBufferUtil.bytes("key2"));
+        assert result.get(0).key.getKey().equals(ByteBufferUtil.bytes("key2"));
     }
 
     @Test
@@ -206,10 +243,10 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         assert rows != null;
         assert rows.size() == 2 : StringUtils.join(rows, ",");
 
-        String key = new String(rows.get(0).key.key.array(),rows.get(0).key.key.position(),rows.get(0).key.key.remaining());
+        String key = new String(rows.get(0).key.getKey().array(), rows.get(0).key.getKey().position(), rows.get(0).key.getKey().remaining());
         assert "k1".equals( key ) : key;
 
-        key = new String(rows.get(1).key.key.array(),rows.get(1).key.key.position(),rows.get(1).key.key.remaining());
+        key = new String(rows.get(1).key.getKey().array(), rows.get(1).key.getKey().position(), rows.get(1).key.getKey().remaining());
         assert "k3".equals(key) : key;
 
         assert ByteBufferUtil.bytes(1L).equals( rows.get(0).cf.getColumn(birthdate).value());
@@ -221,14 +258,14 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         rows = cfs.search(range, clause, filter, 100);
 
         assert rows.size() == 1 : StringUtils.join(rows, ",");
-        key = new String(rows.get(0).key.key.array(),rows.get(0).key.key.position(),rows.get(0).key.key.remaining());
+        key = new String(rows.get(0).key.getKey().array(), rows.get(0).key.getKey().position(), rows.get(0).key.getKey().remaining());
         assert "k3".equals( key );
 
         // same query again, but with resultset not including the subordinate expression
         rows = cfs.search(range, clause, Util.namesFilter(cfs, "birthdate"), 100);
 
         assert rows.size() == 1 : StringUtils.join(rows, ",");
-        key = new String(rows.get(0).key.key.array(),rows.get(0).key.key.position(),rows.get(0).key.key.remaining());
+        key = new String(rows.get(0).key.getKey().array(), rows.get(0).key.getKey().position(), rows.get(0).key.getKey().remaining());
         assert "k3".equals( key );
 
         assert rows.get(0).cf.getColumnCount() == 1 : rows.get(0).cf;
@@ -238,7 +275,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         rows = cfs.search(range, clause, emptyFilter, 100);
 
         assert rows.size() == 1 : StringUtils.join(rows, ",");
-        key = new String(rows.get(0).key.key.array(),rows.get(0).key.key.position(),rows.get(0).key.key.remaining());
+        key = new String(rows.get(0).key.getKey().array(), rows.get(0).key.getKey().position(), rows.get(0).key.getKey().remaining());
         assert "k3".equals( key );
 
         assertFalse(rows.get(0).cf.hasColumns());
@@ -297,7 +334,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         Range<RowPosition> range = Util.range("", "");
         List<Row> rows = cfs.search(range, clause, filter, 100);
         assert rows.size() == 1 : StringUtils.join(rows, ",");
-        String key = ByteBufferUtil.string(rows.get(0).key.key);
+        String key = ByteBufferUtil.string(rows.get(0).key.getKey());
         assert "k1".equals( key );
 
         // delete the column directly
@@ -321,7 +358,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         rm.apply();
         rows = cfs.search(range, clause, filter, 100);
         assert rows.size() == 1 : StringUtils.join(rows, ",");
-        key = ByteBufferUtil.string(rows.get(0).key.key);
+        key = ByteBufferUtil.string(rows.get(0).key.getKey());
         assert "k1".equals( key );
 
         // verify that row and delete w/ older timestamp does nothing
@@ -330,7 +367,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         rm.apply();
         rows = cfs.search(range, clause, filter, 100);
         assert rows.size() == 1 : StringUtils.join(rows, ",");
-        key = ByteBufferUtil.string(rows.get(0).key.key);
+        key = ByteBufferUtil.string(rows.get(0).key.getKey());
         assert "k1".equals( key );
 
         // similarly, column delete w/ older timestamp should do nothing
@@ -339,7 +376,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         rm.apply();
         rows = cfs.search(range, clause, filter, 100);
         assert rows.size() == 1 : StringUtils.join(rows, ",");
-        key = ByteBufferUtil.string(rows.get(0).key.key);
+        key = ByteBufferUtil.string(rows.get(0).key.getKey());
         assert "k1".equals( key );
 
         // delete the entire row (w/ newer timestamp this time)
@@ -371,7 +408,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         rm.apply();
         rows = cfs.search(range, clause, filter, 100);
         assert rows.size() == 1 : StringUtils.join(rows, ",");
-        key = ByteBufferUtil.string(rows.get(0).key.key);
+        key = ByteBufferUtil.string(rows.get(0).key.getKey());
         assert "k1".equals( key );
     }
 
@@ -401,7 +438,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         expr = new IndexExpression(ByteBufferUtil.bytes("birthdate"), IndexExpression.Operator.EQ, ByteBufferUtil.bytes(2L));
         clause = Arrays.asList(expr);
         rows = keyspace.getColumnFamilyStore("Indexed1").search(range, clause, filter, 100);
-        String key = ByteBufferUtil.string(rows.get(0).key.key);
+        String key = ByteBufferUtil.string(rows.get(0).key.getKey());
         assert "k1".equals( key );
 
         // update the birthdate value with an OLDER timestamp, and test that the index ignores this
@@ -410,7 +447,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         rm.apply();
 
         rows = keyspace.getColumnFamilyStore("Indexed1").search(range, clause, filter, 100);
-        key = ByteBufferUtil.string(rows.get(0).key.key);
+        key = ByteBufferUtil.string(rows.get(0).key.getKey());
         assert "k1".equals( key );
 
     }
@@ -677,7 +714,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         IDiskAtomFilter filter = new IdentityQueryFilter();
         List<Row> rows = keyspace.getColumnFamilyStore("Indexed2").search(Util.range("", ""), clause, filter, 100);
         assert rows.size() == 1 : StringUtils.join(rows, ",");
-        assertEquals("k1", ByteBufferUtil.string(rows.get(0).key.key));
+        assertEquals("k1", ByteBufferUtil.string(rows.get(0).key.getKey()));
     }
 
     @Test
@@ -734,7 +771,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
                                              Util.namesFilter(cfs, "asdf"),
                                              10);
         assertEquals(2, result.size());
-        assert result.get(0).key.key.equals(ByteBufferUtil.bytes("key1"));
+        assert result.get(0).key.getKey().equals(ByteBufferUtil.bytes("key1"));
     }
 
     @Test
@@ -749,16 +786,16 @@ public class ColumnFamilyStoreTest extends SchemaLoader
 
         // create an isolated sstable.
         putColsSuper(cfs, key, scfName,
-                new Cell(cellname(1L), ByteBufferUtil.bytes("val1"), 1),
-                new Cell(cellname(2L), ByteBufferUtil.bytes("val2"), 1),
-                new Cell(cellname(3L), ByteBufferUtil.bytes("val3"), 1));
+                new BufferCell(cellname(1L), ByteBufferUtil.bytes("val1"), 1),
+                new BufferCell(cellname(2L), ByteBufferUtil.bytes("val2"), 1),
+                new BufferCell(cellname(3L), ByteBufferUtil.bytes("val3"), 1));
         cfs.forceBlockingFlush();
 
         // insert, don't flush.
         putColsSuper(cfs, key, scfName,
-                new Cell(cellname(4L), ByteBufferUtil.bytes("val4"), 1),
-                new Cell(cellname(5L), ByteBufferUtil.bytes("val5"), 1),
-                new Cell(cellname(6L), ByteBufferUtil.bytes("val6"), 1));
+                new BufferCell(cellname(4L), ByteBufferUtil.bytes("val4"), 1),
+                new BufferCell(cellname(5L), ByteBufferUtil.bytes("val5"), 1),
+                new BufferCell(cellname(6L), ByteBufferUtil.bytes("val6"), 1));
 
         // verify insert.
         final SlicePredicate sp = new SlicePredicate();
@@ -770,7 +807,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         assertRowAndColCount(1, 6, false, cfs.getRangeSlice(Util.range("f", "g"), null, ThriftValidation.asIFilter(sp, cfs.metadata, scfName), 100));
 
         // delete
-        Mutation rm = new Mutation(keyspace.getName(), key.key);
+        Mutation rm = new Mutation(keyspace.getName(), key.getKey());
         rm.deleteRange(cfName, SuperColumns.startOf(scfName), SuperColumns.endOf(scfName), 2);
         rm.apply();
 
@@ -785,17 +822,17 @@ public class ColumnFamilyStoreTest extends SchemaLoader
 
         // late insert.
         putColsSuper(cfs, key, scfName,
-                new Cell(cellname(4L), ByteBufferUtil.bytes("val4"), 1L),
-                new Cell(cellname(7L), ByteBufferUtil.bytes("val7"), 1L));
+                new BufferCell(cellname(4L), ByteBufferUtil.bytes("val4"), 1L),
+                new BufferCell(cellname(7L), ByteBufferUtil.bytes("val7"), 1L));
 
         // re-verify delete.
         assertRowAndColCount(1, 0, false, cfs.getRangeSlice(Util.range("f", "g"), null, ThriftValidation.asIFilter(sp, cfs.metadata, scfName), 100));
 
         // make sure new writes are recognized.
         putColsSuper(cfs, key, scfName,
-                new Cell(cellname(3L), ByteBufferUtil.bytes("val3"), 3),
-                new Cell(cellname(8L), ByteBufferUtil.bytes("val8"), 3),
-                new Cell(cellname(9L), ByteBufferUtil.bytes("val9"), 3));
+                new BufferCell(cellname(3L), ByteBufferUtil.bytes("val3"), 3),
+                new BufferCell(cellname(8L), ByteBufferUtil.bytes("val8"), 3),
+                new BufferCell(cellname(9L), ByteBufferUtil.bytes("val9"), 3));
         assertRowAndColCount(1, 3, false, cfs.getRangeSlice(Util.range("f", "g"), null, ThriftValidation.asIFilter(sp, cfs.metadata, scfName), 100));
     }
 
@@ -824,7 +861,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         ColumnFamily cf = ArrayBackedSortedColumns.factory.create(cfs.keyspace.getName(), cfs.name);
         for (Cell col : cols)
             cf.addColumn(col.withUpdatedName(CellNames.compositeDense(scfName, col.name().toByteBuffer())));
-        Mutation rm = new Mutation(cfs.keyspace.getName(), key.key, cf);
+        Mutation rm = new Mutation(cfs.keyspace.getName(), key.getKey(), cf);
         rm.apply();
     }
 
@@ -833,7 +870,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         ColumnFamily cf = ArrayBackedSortedColumns.factory.create(cfs.keyspace.getName(), cfs.name);
         for (Cell col : cols)
             cf.addColumn(col);
-        Mutation rm = new Mutation(cfs.keyspace.getName(), key.key, cf);
+        Mutation rm = new Mutation(cfs.keyspace.getName(), key.getKey(), cf);
         rm.apply();
     }
 
@@ -865,7 +902,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         assertRowAndColCount(1, 4, false, cfs.getRangeSlice(Util.range("f", "g"), null, ThriftValidation.asIFilter(sp, cfs.metadata, null), 100));
 
         // delete (from sstable and memtable)
-        Mutation rm = new Mutation(keyspace.getName(), key.key);
+        Mutation rm = new Mutation(keyspace.getName(), key.getKey());
         rm.delete(cfs.name, 2);
         rm.apply();
 
@@ -917,8 +954,8 @@ public class ColumnFamilyStoreTest extends SchemaLoader
 
         for (int version = 1; version <= 2; ++version)
         {
-            Descriptor existing = new Descriptor(cfs.directories.getDirectoryForCompactedSSTables(), "Keyspace2", "Standard1", version, false);
-            Descriptor desc = new Descriptor(Directories.getBackupsDirectory(existing), "Keyspace2", "Standard1", version, false);
+            Descriptor existing = new Descriptor(cfs.directories.getDirectoryForCompactedSSTables(), "Keyspace2", "Standard1", version, Descriptor.Type.FINAL);
+            Descriptor desc = new Descriptor(Directories.getBackupsDirectory(existing), "Keyspace2", "Standard1", version, Descriptor.Type.FINAL);
             for (Component c : new Component[]{ Component.DATA, Component.PRIMARY_INDEX, Component.FILTER, Component.STATS })
                 assertTrue("can not find backedup file:" + desc.filenameFor(c), new File(desc.filenameFor(c)).exists());
         }
@@ -936,8 +973,8 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         DecoratedKey key = Util.dk("slice-get-uuid-type");
 
         // Insert a row with one supercolumn and multiple subcolumns
-        putColsSuper(cfs, key, superColName, new Cell(cellname("a"), ByteBufferUtil.bytes("A"), 1),
-                                             new Cell(cellname("b"), ByteBufferUtil.bytes("B"), 1));
+        putColsSuper(cfs, key, superColName, new BufferCell(cellname("a"), ByteBufferUtil.bytes("A"), 1),
+                                             new BufferCell(cellname("b"), ByteBufferUtil.bytes("B"), 1));
 
         // Get the entire supercolumn like normal
         ColumnFamily cfGet = cfs.getColumnFamily(QueryFilter.getIdentityFilter(key, cfName, System.currentTimeMillis()));
@@ -948,7 +985,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         SortedSet<CellName> sliceColNames = new TreeSet<CellName>(cfs.metadata.comparator);
         sliceColNames.add(CellNames.compositeDense(superColName, ByteBufferUtil.bytes("a")));
         sliceColNames.add(CellNames.compositeDense(superColName, ByteBufferUtil.bytes("b")));
-        SliceByNamesReadCommand cmd = new SliceByNamesReadCommand(keyspaceName, key.key, cfName, System.currentTimeMillis(), new NamesQueryFilter(sliceColNames));
+        SliceByNamesReadCommand cmd = new SliceByNamesReadCommand(keyspaceName, key.getKey(), cfName, System.currentTimeMillis(), new NamesQueryFilter(sliceColNames));
         ColumnFamily cfSliced = cmd.getRow(keyspace).cf;
 
         // Make sure the slice returns the same as the straight get
@@ -957,7 +994,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
     }
 
     @Test
-    public void testSliceByNamesCommandOldMetatada() throws Throwable
+    public void testSliceByNamesCommandOldMetadata() throws Throwable
     {
         String keyspaceName = "Keyspace1";
         String cfName= "Standard1";
@@ -968,7 +1005,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         cfs.clearUnsafe();
 
         // Create a cell a 'high timestamp'
-        putColsStandard(cfs, key, new Cell(cname, ByteBufferUtil.bytes("a"), 2));
+        putColsStandard(cfs, key, new BufferCell(cname, ByteBufferUtil.bytes("a"), 2));
         cfs.forceBlockingFlush();
 
         // Nuke the metadata and reload that sstable
@@ -981,13 +1018,15 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         cfs.loadNewSSTables();
 
         // Add another cell with a lower timestamp
-        putColsStandard(cfs, key, new Cell(cname, ByteBufferUtil.bytes("b"), 1));
+        putColsStandard(cfs, key, new BufferCell(cname, ByteBufferUtil.bytes("b"), 1));
 
         // Test fetching the cell by name returns the first cell
-        SliceByNamesReadCommand cmd = new SliceByNamesReadCommand(keyspaceName, key.key, cfName, System.currentTimeMillis(), new NamesQueryFilter(FBUtilities.singleton(cname, cfs.getComparator())));
+        SliceByNamesReadCommand cmd = new SliceByNamesReadCommand(keyspaceName, key.getKey(), cfName, System.currentTimeMillis(), new NamesQueryFilter(FBUtilities.singleton(cname, cfs.getComparator())));
         ColumnFamily cf = cmd.getRow(keyspace).cf;
         Cell cell = cf.getColumn(cname);
         assert cell.value().equals(ByteBufferUtil.bytes("a")) : "expecting a, got " + ByteBufferUtil.string(cell.value());
+
+        Keyspace.clear("Keyspace1"); // CASSANDRA-7195
     }
 
     private static void assertTotalColCount(Collection<Row> rows, int expectedCount)
@@ -1213,7 +1252,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
             for (Row row : rows)
             {
                 sb.append("{");
-                sb.append(ByteBufferUtil.string(row.key.key));
+                sb.append(ByteBufferUtil.string(row.key.getKey()));
                 sb.append(":");
                 if (row.cf != null && !row.cf.isEmpty())
                 {
@@ -1362,7 +1401,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         Cell[] cols = new Cell[letters.length];
         for (int i = 0; i < cols.length; i++)
         {
-            cols[i] = new Cell(cellname("col" + letters[i].toUpperCase()),
+            cols[i] = new BufferCell(cellname("col" + letters[i].toUpperCase()),
                     ByteBuffer.wrap(new byte[1]), 1);
         }
 
@@ -1411,7 +1450,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         Cell[] cols = new Cell[letters.length];
         for (int i = 0; i < cols.length; i++)
         {
-            cols[i] = new Cell(cellname("col" + letters[i].toUpperCase()),
+            cols[i] = new BufferCell(cellname("col" + letters[i].toUpperCase()),
                     ByteBuffer.wrap(new byte[1366]), 1);
         }
 
@@ -1460,7 +1499,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         Cell[] cols = new Cell[letters.length];
         for (int i = 0; i < cols.length; i++)
         {
-            cols[i] = new Cell(cellname("col" + letters[i].toUpperCase()),
+            cols[i] = new BufferCell(cellname("col" + letters[i].toUpperCase()),
                     ByteBuffer.wrap(new byte[1]), 1);
         }
 
@@ -1510,7 +1549,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         Cell[] cols = new Cell[letters.length];
         for (int i = 0; i < cols.length; i++)
         {
-            cols[i] = new Cell(cellname("col" + letters[i].toUpperCase()),
+            cols[i] = new BufferCell(cellname("col" + letters[i].toUpperCase()),
                     ByteBuffer.wrap(new byte[1366]), 1);
         }
 
@@ -1558,7 +1597,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         Cell[] cols = new Cell[letters.length];
         for (int i = 0; i < cols.length; i++)
         {
-            cols[i] = new Cell(cellname("col" + letters[i].toUpperCase()),
+            cols[i] = new BufferCell(cellname("col" + letters[i].toUpperCase()),
                     // use 1366 so that three cols make an index segment
                     ByteBuffer.wrap(new byte[1366]), 1);
         }
@@ -1698,7 +1737,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
                 MetadataCollector collector = new MetadataCollector(cfmeta.comparator);
                 for (int ancestor : ancestors)
                     collector.addAncestor(ancestor);
-                String file = new Descriptor(directory, ks, cf, 3, true).filenameFor(Component.DATA);
+                String file = new Descriptor(directory, ks, cf, 3, Descriptor.Type.TEMP).filenameFor(Component.DATA);
                 return new SSTableWriter(file,
                                          0,
                                          ActiveRepairService.UNREPAIRED_SSTABLE,
@@ -1819,7 +1858,7 @@ public class ColumnFamilyStoreTest extends SchemaLoader
         Cell[] cols = new Cell[12];
         for (int i = 0; i < cols.length; i++)
         {
-            cols[i] = new Cell(cellname("col" + letters[i]), ByteBuffer.wrap(new byte[valueSize]), 1);
+            cols[i] = new BufferCell(cellname("col" + letters[i]), ByteBuffer.wrap(new byte[valueSize]), 1);
         }
 
         for (int i = 0; i < 12; i++)

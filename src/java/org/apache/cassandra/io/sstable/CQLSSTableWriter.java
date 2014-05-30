@@ -195,19 +195,20 @@ public class CQLSSTableWriter
         if (values.size() != boundNames.size())
             throw new InvalidRequestException(String.format("Invalid number of arguments, expecting %d values but got %d", boundNames.size(), values.size()));
 
-        List<ByteBuffer> keys = insert.buildPartitionKeyNames(values);
-        Composite clusteringPrefix = insert.createClusteringPrefix(values);
+        QueryOptions options = QueryOptions.forInternalCalls(null, values);
+        List<ByteBuffer> keys = insert.buildPartitionKeyNames(options);
+        Composite clusteringPrefix = insert.createClusteringPrefix(options);
 
         long now = System.currentTimeMillis() * 1000;
         UpdateParameters params = new UpdateParameters(insert.cfm,
-                                                       values,
-                                                       insert.getTimestamp(now, values),
-                                                       insert.getTimeToLive(values),
+                                                       options,
+                                                       insert.getTimestamp(now, options),
+                                                       insert.getTimeToLive(options),
                                                        Collections.<ByteBuffer, CQL3Row>emptyMap());
 
         for (ByteBuffer key: keys)
         {
-            if (writer.currentKey() == null || !key.equals(writer.currentKey().key))
+            if (writer.currentKey() == null || !key.equals(writer.currentKey().getKey()))
                 writer.newRow(key);
             insert.addUpdateForKey(writer.currentColumnFamily(), key, clusteringPrefix, params);
         }

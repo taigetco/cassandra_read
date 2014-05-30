@@ -74,7 +74,7 @@ class Cql3ParsingRuleSet(CqlParsingRuleSet):
         # (CQL3 option name, schema_columnfamilies column name (or None if same),
         #  list of known map keys)
         ('compaction', 'compaction_strategy_options',
-            ('class', 'min_threshold', 'max_threshold')),
+            ('class', 'max_threshold', 'tombstone_compaction_interval', 'tombstone_threshold', 'enabled', 'unchecked_tombstone_compaction')),
         ('compression', 'compression_parameters',
             ('sstable_compression', 'chunk_length_kb', 'crc_check_chance')),
         ('caching', None,
@@ -465,6 +465,10 @@ def cf_prop_val_mapkey_completer(ctxt, cass):
         csc = csc.split('.')[-1]
         if csc == 'SizeTieredCompactionStrategy':
             opts.add('min_sstable_size')
+            opts.add('min_threshold')
+            opts.add('bucket_high')
+            opts.add('bucket_low')
+            opts.add('cold_reads_to_omit')
         elif csc == 'LeveledCompactionStrategy':
             opts.add('sstable_size_in_mb')
         return map(escape_value, opts)
@@ -1145,7 +1149,7 @@ class UserTypesMeta(object):
                 result[ksname] = {}
             utname = row.type_name
 
-            result[ksname][utname] = zip(row.column_names, row.column_types)
+            result[ksname][utname] = zip(row.field_names, row.field_types)
         return cls(meta=result)
 
     def get_usertypes_names(self, keyspace):

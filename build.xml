@@ -25,7 +25,7 @@
     <property name="debuglevel" value="source,lines,vars"/>
 
     <!-- default version and SCM information -->
-    <property name="base.version" value="2.1.0-beta1"/>
+    <property name="base.version" value="2.1.0-beta2"/>
     <property name="scm.connection" value="scm:git://git.apache.org/cassandra.git"/>
     <property name="scm.developerConnection" value="scm:git://git.apache.org/cassandra.git"/>
     <property name="scm.url" value="http://git-wip-us.apache.org/repos/asf?p=cassandra.git;a=tree"/>
@@ -193,6 +193,7 @@
         classpath="${build.dir.lib}/jars/antlr-3.5.2.jar;${build.lib}/antlr-runtime-3.5.2.jar;${build.lib}/stringtemplate-4.0.2.jar"
             fork="true"
             failonerror="true">
+         <jvmarg value="-Xmx512M" />
          <arg value="${build.src.java}/org/apache/cassandra/cli/Cli.g" />
          <arg value="-fo" />
          <arg value="${build.src.gen-java}/org/apache/cassandra/cli/" />
@@ -214,6 +215,7 @@
             classpath="${build.dir.lib}/jars/antlr-3.5.2.jar;${build.lib}/antlr-runtime-3.5.2.jar;${build.lib}/stringtemplate-4.0.2.jar"
             fork="true"
             failonerror="true">
+         <jvmarg value="-Xmx512M" />
          <arg value="-Xconversiontimeout" />
          <arg value="10000" />
          <arg value="${build.src.java}/org/apache/cassandra/cql3/Cql.g" />
@@ -334,17 +336,17 @@
           <dependency groupId="org.antlr" artifactId="antlr-runtime" version="3.5.2"/>
           <dependency groupId="org.antlr" artifactId="stringtemplate" version="4.0.2"/>
           <dependency groupId="org.slf4j" artifactId="slf4j-api" version="1.7.2"/>
-          <dependency groupId="ch.qos.logback" artifactId="logback-core" version="1.1.12"/>
-          <dependency groupId="ch.qos.logback" artifactId="logback-classic" version="1.1.12"/>
+          <dependency groupId="ch.qos.logback" artifactId="logback-core" version="1.1.2"/>
+          <dependency groupId="ch.qos.logback" artifactId="logback-classic" version="1.1.2"/>
           <dependency groupId="org.codehaus.jackson" artifactId="jackson-core-asl" version="1.9.2"/>
           <dependency groupId="org.codehaus.jackson" artifactId="jackson-mapper-asl" version="1.9.2"/>
           <dependency groupId="jline" artifactId="jline" version="1.0">
             <exclusion groupId="junit" artifactId="junit"/>
           </dependency>
           <dependency groupId="com.googlecode.json-simple" artifactId="json-simple" version="1.1"/>
-          <dependency groupId="com.github.stephenc.high-scale-lib" artifactId="high-scale-lib" version="1.1.2"/>
-          <dependency groupId="com.github.stephenc" artifactId="jamm" version="0.2.6"/>
-          <dependency groupId="com.thinkaurelius.thrift" artifactId="thrift-server" version="0.3.3">
+          <dependency groupId="com.boundary" artifactId="high-scale-lib" version="1.0.6"/>
+          <dependency groupId="com.github.jbellis" artifactId="jamm" version="0.2.6"/>
+          <dependency groupId="com.thinkaurelius.thrift" artifactId="thrift-server" version="0.3.5">
 	      	<exclusion groupId="org.slf4j" artifactId="slf4j-log4j12"/>
           </dependency>
           <dependency groupId="org.yaml" artifactId="snakeyaml" version="1.11"/>
@@ -362,7 +364,9 @@
           <dependency groupId="org.apache.pig" artifactId="pig" version="0.11.1"/>
           <dependency groupId="net.java.dev.jna" artifactId="jna" version="4.0.0"/>
 
-          <dependency groupId="net.sourceforge.cobertura" artifactId="cobertura" version="${cobertura.version}"/>
+          <dependency groupId="net.sourceforge.cobertura" artifactId="cobertura" version="${cobertura.version}">
+            <exclusion groupId="xerces" artifactId="xercesImpl"/>
+          </dependency>
 
           <dependency groupId="org.apache.cassandra" artifactId="cassandra-all" version="${version}" />
           <dependency groupId="org.apache.cassandra" artifactId="cassandra-thrift" version="${version}" />
@@ -370,7 +374,7 @@
           <dependency groupId="com.addthis.metrics" artifactId="reporter-config" version="2.1.0" />
           <dependency groupId="org.mindrot" artifactId="jbcrypt" version="0.3m" />
           <dependency groupId="io.airlift" artifactId="airline" version="0.6" />
-          <dependency groupId="io.netty" artifactId="netty" version="3.6.6.Final" />
+          <dependency groupId="io.netty" artifactId="netty-all" version="4.0.17.Final" />
           <dependency groupId="com.google.code.findbugs" artifactId="jsr305" version="2.0.2" />
           <dependency groupId="com.clearspring.analytics" artifactId="stream" version="2.5.2" />
           <dependency groupId="com.datastax.cassandra" artifactId="cassandra-driver-core" version="2.0.1" />
@@ -454,12 +458,12 @@
         <dependency groupId="org.codehaus.jackson" artifactId="jackson-mapper-asl"/>
         <dependency groupId="jline" artifactId="jline"/>
         <dependency groupId="com.googlecode.json-simple" artifactId="json-simple"/>
-        <dependency groupId="com.github.stephenc.high-scale-lib" artifactId="high-scale-lib"/>
+        <dependency groupId="com.boundary" artifactId="high-scale-lib"/>
         <dependency groupId="org.yaml" artifactId="snakeyaml"/>
         <dependency groupId="org.mindrot" artifactId="jbcrypt"/>
         <dependency groupId="com.yammer.metrics" artifactId="metrics-core"/>
         <dependency groupId="com.addthis.metrics" artifactId="reporter-config"/>
-        <dependency groupId="com.thinkaurelius.thrift" artifactId="thrift-server" version="0.3.3"/>
+        <dependency groupId="com.thinkaurelius.thrift" artifactId="thrift-server" version="0.3.5"/>
         <dependency groupId="com.clearspring.analytics" artifactId="stream" version="2.5.2" />
         <dependency groupId="net.sf.supercsv" artifactId="super-csv" version="2.1.0" />
 
@@ -479,8 +483,8 @@
         <dependency groupId="net.java.dev.jna" artifactId="jna" version="4.0.0"/>
         
         <!-- don't need jamm unless running a server in which case it needs to be a -javagent to be used anyway -->
-        <dependency groupId="com.github.stephenc" artifactId="jamm"/>
-        <dependency groupId="io.netty" artifactId="netty"/>
+        <dependency groupId="com.github.jbellis" artifactId="jamm"/>
+        <dependency groupId="io.netty" artifactId="netty-all"/>
       </artifact:pom>
       <artifact:pom id="thrift-pom"
                     artifactId="cassandra-thrift"
@@ -672,6 +676,7 @@
                destdir="${build.classes.main}" includeantruntime="false" source="${source.version}" target="${target.version}">
             <src path="${build.src.java}"/>
             <src path="${build.src.gen-java}"/>
+        	<compilerarg value="-XDignore.symbol.file"/>
             <classpath refid="cassandra.classpath"/>
         </javac>
         <antcall target="createVersionPropFile"/>
@@ -1099,8 +1104,8 @@
         <pathelement location="${build.dir}/${ant.project.name}-thrift-${version}.jar" />
         <pathelement location="${build.lib}/libthrift-0.9.0.jar" />
         <pathelement location="${build.lib}/slf4j-api-1.7.2.jar" />
-        <pathelement location="${build.lib}/logback-core-1.1.12.jar" />
-        <pathelement location="${build.lib}/logback-classic-1.1.12.jar" />
+        <pathelement location="${build.lib}/logback-core-1.1.2.jar" />
+        <pathelement location="${build.lib}/logback-classic-1.1.2.jar" />
         <pathelement location="${build.lib}/jackson-core-asl-1.9.2.jar" />
         <pathelement location="${build.lib}/jackson-mapper-asl-1.9.2.jar" />
         <fileset dir="${build.dir.lib}">

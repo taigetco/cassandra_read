@@ -106,7 +106,7 @@ public class LazilyCompactedRow extends AbstractCompactedRow
         ColumnIndex columnsIndex;
         try
         {
-            indexBuilder = new ColumnIndex.Builder(emptyColumnFamily, key.key, out);
+            indexBuilder = new ColumnIndex.Builder(emptyColumnFamily, key.getKey(), out);
             columnsIndex = indexBuilder.buildForCompaction(merger);
 
             // if there aren't any columns or tombstones, return null
@@ -156,7 +156,7 @@ public class LazilyCompactedRow extends AbstractCompactedRow
         }
 
         // initialize indexBuilder for the benefit of its tombstoneTracker, used by our reducing iterator
-        indexBuilder = new ColumnIndex.Builder(emptyColumnFamily, key.key, out);
+        indexBuilder = new ColumnIndex.Builder(emptyColumnFamily, key.getKey(), out);
         while (merger.hasNext())
             merger.next().updateDigest(digest);
         close();
@@ -223,11 +223,8 @@ public class LazilyCompactedRow extends AbstractCompactedRow
                 if (indexer == SecondaryIndexManager.nullUpdater)
                     return;
 
-                if (!cell.isMarkedForDelete(System.currentTimeMillis())
-                    && !container.getColumn(cell.name()).equals(cell))
-                {
+                if (cell.isLive() && !container.getColumn(cell.name()).equals(cell))
                     indexer.remove(cell);
-                }
             }
         }
 

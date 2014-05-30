@@ -99,7 +99,7 @@ public class LongCompactionsTest extends SchemaLoader
 
         long start = System.nanoTime();
         final int gcBefore = (int) (System.currentTimeMillis() / 1000) - Schema.instance.getCFMetaData(KEYSPACE1, "Standard1").getGcGraceSeconds();
-        new CompactionTask(store, sstables, gcBefore).execute(null);
+        new CompactionTask(store, sstables, gcBefore, false).execute(null);
         System.out.println(String.format("%s: sstables=%d rowsper=%d colsper=%d: %d ms",
                                          this.getClass().getName(),
                                          sstableCount,
@@ -127,7 +127,7 @@ public class LongCompactionsTest extends SchemaLoader
         for (int j = 0; j < SSTABLES; j++) {
             for (int i = 0; i < ROWS_PER_SSTABLE; i++) {
                 DecoratedKey key = Util.dk(String.valueOf(i % 2));
-                Mutation rm = new Mutation(KEYSPACE1, key.key);
+                Mutation rm = new Mutation(KEYSPACE1, key.getKey());
                 long timestamp = j * ROWS_PER_SSTABLE + i;
                 rm.add("Standard1", Util.cellname(String.valueOf(i / 2)),
                        ByteBufferUtil.EMPTY_BYTE_BUFFER,

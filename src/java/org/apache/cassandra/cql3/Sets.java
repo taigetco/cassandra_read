@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -33,10 +34,10 @@ import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.composites.CellName;
 import org.apache.cassandra.db.composites.Composite;
-import org.apache.cassandra.db.marshal.CollectionType;
 import org.apache.cassandra.db.marshal.MapType;
 import org.apache.cassandra.db.marshal.SetType;
 import org.apache.cassandra.exceptions.InvalidRequestException;
+import org.apache.cassandra.serializers.CollectionSerializer;
 import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
@@ -88,7 +89,7 @@ public abstract class Sets
                 values.add(t);
             }
             DelayedValue value = new DelayedValue(((SetType)receiver.type).elements, values);
-            return allTerminal ? value.bind(Collections.<ByteBuffer>emptyList()) : value;
+            return allTerminal ? value.bind(QueryOptions.DEFAULT) : value;
         }
 
         private void validateAssignableTo(String keyspace, ColumnSpecification receiver) throws InvalidRequestException
@@ -140,13 +141,13 @@ public abstract class Sets
             this.elements = elements;
         }
 
-        public static Value fromSerialized(ByteBuffer value, SetType type) throws InvalidRequestException
+        public static Value fromSerialized(ByteBuffer value, SetType type, int version) throws InvalidRequestException
         {
             try
             {
                 // Collections have this small hack that validate cannot be called on a serialized object,
                 // but compose does the validation (so we're fine).
-                Set<?> s = (Set<?>)type.compose(value);
+                Set<?> s = (Set<?>)type.getSerializer().deserializeForNativeProtocol(value, version);
                 Set<ByteBuffer> elements = new LinkedHashSet<ByteBuffer>(s.size());
                 for (Object element : s)
                     elements.add(type.elements.decompose(element));
@@ -158,9 +159,23 @@ public abstract class Sets
             }
         }
 
-        public ByteBuffer get()
+        public ByteBuffer get(QueryOptions options)
         {
-            return CollectionType.pack(new ArrayList<ByteBuffer>(elements), elements.size());
+            return CollectionSerializer.pack(new ArrayList<ByteBuffer>(elements), elements.size(), options.getProtocolVersion());
+        }
+
+        public boolean equals(SetType st, Value v)
+        {
+            if (elements.size() != v.elements.size())
+                return false;
+
+            Iterator<ByteBuffer> thisIter = elements.iterator();
+            Iterator<ByteBuffer> thatIter = v.elements.iterator();
+            while (thisIter.hasNext())
+                if (st.elements.compare(thisIter.next(), thatIter.next()) != 0)
+                    return false;
+
+            return true;
         }
     }
 
@@ -186,12 +201,12 @@ public abstract class Sets
         {
         }
 
-        public Value bind(List<ByteBuffer> values) throws InvalidRequestException
+        public Value bind(QueryOptions options) throws InvalidRequestException
         {
             Set<ByteBuffer> buffers = new TreeSet<ByteBuffer>(comparator);
             for (Term t : elements)
             {
-                ByteBuffer bytes = t.bindAndGet(values);
+                ByteBuffer bytes = t.bindAndGet(options);
 
                 if (bytes == null)
                     throw new InvalidRequestException("null is not supported inside collections");
@@ -216,10 +231,10 @@ public abstract class Sets
             assert receiver.type instanceof SetType;
         }
 
-        public Value bind(List<ByteBuffer> values) throws InvalidRequestException
+        public Value bind(QueryOptions options) throws InvalidRequestException
         {
-            ByteBuffer value = values.get(bindIndex);
-            return value == null ? null : Value.fromSerialized(value, (SetType)receiver.type);
+            ByteBuffer value = options.getValues().get(bindIndex);
+            return value == null ? null : Value.fromSerialized(value, (SetType)receiver.type, options.getProtocolVersion());
         }
     }
 
@@ -253,7 +268,7 @@ public abstract class Sets
 
         static void doAdd(Term t, ColumnFamily cf, Composite prefix, ColumnDefinition column, UpdateParameters params) throws InvalidRequestException
         {
-            Term.Terminal value = t.bind(params.variables);
+            Term.Terminal value = t.bind(params.options);
             if (value == null)
                 return;
 
@@ -277,7 +292,7 @@ public abstract class Sets
 
         public void execute(ByteBuffer rowKey, ColumnFamily cf, Composite prefix, UpdateParameters params) throws InvalidRequestException
         {
-            Term.Terminal value = t.bind(params.variables);
+            Term.Terminal value = t.bind(params.options);
             if (value == null)
                 return;
 

@@ -283,6 +283,17 @@ public class CacheService implements CacheServiceMBean
         keyCache.clear();
     }
 
+    public void invalidateKeyCacheForCf(UUID cfId)
+    {
+        Iterator<KeyCacheKey> keyCacheIterator = keyCache.getKeySet().iterator();
+        while (keyCacheIterator.hasNext())
+        {
+            KeyCacheKey key = keyCacheIterator.next();
+            if (key.cfId.equals(cfId))
+                keyCacheIterator.remove();
+        }
+    }
+
     public void invalidateRowCache()
     {
         rowCache.clear();
@@ -406,7 +417,7 @@ public class CacheService implements CacheServiceMBean
                     if (cf == null)
                         return null;
                     Cell cell = cf.getColumn(cellName);
-                    if (cell == null || cell.isMarkedForDelete(Long.MIN_VALUE))
+                    if (cell == null || !cell.isLive(Long.MIN_VALUE))
                         return null;
                     ClockAndCount clockAndCount = CounterContext.instance().getLocalClockAndCount(cell.value());
                     return Pair.create(CounterCacheKey.create(cfs.metadata.cfId, partitionKey, cellName), clockAndCount);

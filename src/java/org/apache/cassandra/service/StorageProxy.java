@@ -22,7 +22,6 @@ import java.lang.management.ManagementFactory;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
 import java.util.*;
-import java.util.Random;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import javax.management.MBeanServer;
@@ -522,21 +521,20 @@ public class StorageProxy implements StorageProxyMBean
         }
     }
 
-    public static void mutateWithTriggers(Collection<? extends IMutation> mutations, ConsistencyLevel consistencyLevel, boolean mutateAtomically)
+    @SuppressWarnings("unchecked")
+    public static void mutateWithTriggers(Collection<? extends IMutation> mutations,
+                                          ConsistencyLevel consistencyLevel,
+                                          boolean mutateAtomically)
     throws WriteTimeoutException, UnavailableException, OverloadedException, InvalidRequestException
     {
-        Collection<Mutation> tmutations = TriggerExecutor.instance.execute(mutations);
-        if (mutateAtomically || tmutations != null)
-        {
-            Collection<Mutation> allMutations = new ArrayList<>((Collection<Mutation>) mutations);
-            if (tmutations != null)
-                allMutations.addAll(tmutations);
-            StorageProxy.mutateAtomically(allMutations, consistencyLevel);
-        }
+        Collection<Mutation> augmented = TriggerExecutor.instance.execute(mutations);
+
+        if (augmented != null)
+            mutateAtomically(augmented, consistencyLevel);
+        else if (mutateAtomically)
+            mutateAtomically((Collection<Mutation>) mutations, consistencyLevel);
         else
-        {
-            StorageProxy.mutate(mutations, consistencyLevel);
-        }
+            mutate(mutations, consistencyLevel);
     }
 
     /**
@@ -620,14 +618,15 @@ public class StorageProxy implements StorageProxyMBean
             }
             else if (targetVersion == MessagingService.current_version)
             {
-                MessagingService.instance().sendRR(message, target, handler);
+                MessagingService.instance().sendRR(message, target, handler, false);
             }
             else
             {
                 MessagingService.instance().sendRR(BatchlogManager.getBatchlogMutationFor(mutations, uuid, targetVersion)
                                                                   .createMessage(),
                                                    target,
-                                                   handler);
+                                                   handler,
+                                                   false);
             }
         }
 
@@ -650,7 +649,7 @@ public class StorageProxy implements StorageProxyMBean
             if (target.equals(FBUtilities.getBroadcastAddress()) && OPTIMIZE_LOCAL_REQUESTS)
                 insertLocal(message.payload, handler);
             else
-                MessagingService.instance().sendRR(message, target, handler);
+                MessagingService.instance().sendRR(message, target, handler, false);
         }
     }
 
@@ -741,25 +740,10 @@ public class StorageProxy implements StorageProxyMBean
     throws UnavailableException
     {
         TokenMetadata.Topology topology = StorageService.instance.getTokenMetadata().cachedOnlyTokenMap().getTopology();
-        List<InetAddress> localEndpoints = new ArrayList<>(topology.getDatacenterEndpoints().get(localDataCenter));
+        Multimap<String, InetAddress> localEndpoints = HashMultimap.create(topology.getDatacenterRacks().get(localDataCenter));
+        String localRack = DatabaseDescriptor.getEndpointSnitch().getRack(FBUtilities.getBroadcastAddress());
 
-        // special case for single-node datacenters
-        if (localEndpoints.size() == 1)
-            return localEndpoints;
-
-        List<InetAddress> chosenEndpoints = new ArrayList<>(2);
-        int startOffset = new Random().nextInt(localEndpoints.size());
-
-        // starts at some random point in the list, advances forward until the end, then loops
-        // around to the beginning, advancing again until it is back at the starting point again.
-        for (int i = 0; i < localEndpoints.size() && chosenEndpoints.size() < 2; i++)
-        {
-            InetAddress endpoint = localEndpoints.get((i + startOffset) % localEndpoints.size());
-            // skip localhost and non-alive nodes
-            if (!endpoint.equals(FBUtilities.getBroadcastAddress()) && FailureDetector.instance.isAlive(endpoint))
-                chosenEndpoints.add(endpoint);
-        }
-
+        Collection<InetAddress> chosenEndpoints = new BatchlogManager.EndpointFilter(localRack, localEndpoints).filter();
         if (chosenEndpoints.isEmpty())
         {
             if (consistencyLevel == ConsistencyLevel.ANY)
@@ -825,7 +809,7 @@ public class StorageProxy implements StorageProxyMBean
                     // (1.1 knows how to forward old-style String message IDs; updated to int in 2.0)
                     if (localDataCenter.equals(dc))
                     {
-                        MessagingService.instance().sendRR(message, destination, responseHandler);
+                        MessagingService.instance().sendRR(message, destination, responseHandler, true);
                     }
                     else
                     {
@@ -937,13 +921,18 @@ public class StorageProxy implements StorageProxyMBean
             {
                 InetAddress destination = iter.next();
                 CompactEndpointSerializationHelper.serialize(destination, out);
-                int id = MessagingService.instance().addCallback(handler, message, destination, message.getTimeout(), handler.consistencyLevel);
+                int id = MessagingService.instance().addCallback(handler,
+                                                                 message,
+                                                                 destination,
+                                                                 message.getTimeout(),
+                                                                 handler.consistencyLevel,
+                                                                 true);
                 out.writeInt(id);
                 logger.trace("Adding FWD message to {}@{}", id, destination);
             }
             message = message.withParameter(Mutation.FORWARD_TO, out.getData());
             // send the combined message + forward headers
-            int id = MessagingService.instance().sendRR(message, target, handler);
+            int id = MessagingService.instance().sendRR(message, target, handler, true);
             logger.trace("Sending message to {}@{}", id, target);
         }
         catch (IOException e)
@@ -1006,7 +995,7 @@ public class StorageProxy implements StorageProxyMBean
             AbstractWriteResponseHandler responseHandler = new WriteResponseHandler(endpoint, WriteType.COUNTER);
 
             Tracing.trace("Enqueuing counter update to {}", endpoint);
-            MessagingService.instance().sendRR(cm.makeMutationMessage(), endpoint, responseHandler);
+            MessagingService.instance().sendRR(cm.makeMutationMessage(), endpoint, responseHandler, false);
             return responseHandler;
         }
     }
@@ -1139,7 +1128,7 @@ public class StorageProxy implements StorageProxyMBean
                     throw new ReadTimeoutException(consistency_level, 0, consistency_level.blockFor(Keyspace.open(command.ksName)), false);
                 }
 
-                rows = fetchRows(commands, ConsistencyLevel.QUORUM);
+                rows = fetchRows(commands, consistency_level == ConsistencyLevel.LOCAL_SERIAL ? ConsistencyLevel.LOCAL_QUORUM : ConsistencyLevel.QUORUM);
             }
             else
             {

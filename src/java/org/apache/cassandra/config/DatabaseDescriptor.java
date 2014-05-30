@@ -66,7 +66,8 @@ import org.apache.cassandra.service.CacheService;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.memory.HeapPool;
-import org.apache.cassandra.utils.memory.Pool;
+import org.apache.cassandra.utils.memory.NativePool;
+import org.apache.cassandra.utils.memory.MemtablePool;
 import org.apache.cassandra.utils.memory.SlabPool;
 
 public class DatabaseDescriptor
@@ -187,25 +188,36 @@ public class DatabaseDescriptor
         }
 
         if (conf.commitlog_total_space_in_mb == null)
-            conf.commitlog_total_space_in_mb = hasLargeAddressSpace() ? 1024 : 32;
+            conf.commitlog_total_space_in_mb = hasLargeAddressSpace() ? 8192 : 32;
 
-        /* evaluate the DiskAccessMode Config directive, which also affects indexAccessMode selection */
-        if (conf.disk_access_mode == Config.DiskAccessMode.auto)
+        if (FBUtilities.isUnix())
         {
-            conf.disk_access_mode = hasLargeAddressSpace() ? Config.DiskAccessMode.mmap : Config.DiskAccessMode.standard;
-            indexAccessMode = conf.disk_access_mode;
-            logger.info("DiskAccessMode 'auto' determined to be {}, indexAccessMode is {}", conf.disk_access_mode, indexAccessMode);
+            /* evaluate the DiskAccessMode Config directive, which also affects indexAccessMode selection */
+            if (conf.disk_access_mode == Config.DiskAccessMode.auto)
+            {
+                conf.disk_access_mode = hasLargeAddressSpace() ? Config.DiskAccessMode.mmap : Config.DiskAccessMode.standard;
+                indexAccessMode = conf.disk_access_mode;
+                logger.info("DiskAccessMode 'auto' determined to be {}, indexAccessMode is {}", conf.disk_access_mode, indexAccessMode);
+            }
+            else if (conf.disk_access_mode == Config.DiskAccessMode.mmap_index_only)
+            {
+                conf.disk_access_mode = Config.DiskAccessMode.standard;
+                indexAccessMode = Config.DiskAccessMode.mmap;
+                logger.info("DiskAccessMode is {}, indexAccessMode is {}", conf.disk_access_mode, indexAccessMode);
+            }
+            else
+            {
+                indexAccessMode = conf.disk_access_mode;
+                logger.info("DiskAccessMode is {}, indexAccessMode is {}", conf.disk_access_mode, indexAccessMode);
+            }
         }
-        else if (conf.disk_access_mode == Config.DiskAccessMode.mmap_index_only)
-        {
-            conf.disk_access_mode = Config.DiskAccessMode.standard;
-            indexAccessMode = Config.DiskAccessMode.mmap;
-            logger.info("DiskAccessMode is {}, indexAccessMode is {}", conf.disk_access_mode, indexAccessMode);
-        }
+        // Always force standard mode access on Windows - CASSANDRA-6993. Windows won't allow deletion of hard-links to files that
+        // are memory-mapped which causes trouble with snapshots.
         else
         {
+            conf.disk_access_mode = Config.DiskAccessMode.standard;
             indexAccessMode = conf.disk_access_mode;
-            logger.info("DiskAccessMode is {}, indexAccessMode is {}", conf.disk_access_mode, indexAccessMode);
+            logger.info("Non-unix environment detected.  DiskAccessMode set to {}, indexAccessMode {}", conf.disk_access_mode, indexAccessMode);
         }
 
         /* Authentication and authorization backend, implementing IAuthenticator and IAuthorizer */
@@ -452,7 +464,7 @@ public class DatabaseDescriptor
         }
 
         if (conf.concurrent_compactors == null)
-            conf.concurrent_compactors = FBUtilities.getAvailableProcessors();
+            conf.concurrent_compactors = Math.min(8, Math.max(2, Math.min(FBUtilities.getAvailableProcessors(), conf.data_file_directories.length)));
 
         if (conf.concurrent_compactors <= 0)
             throw new ConfigurationException("concurrent_compactors should be strictly greater than 0");
@@ -488,7 +500,9 @@ public class DatabaseDescriptor
             for (String token : tokensFromString(conf.initial_token))
                 partitioner.getTokenFactory().validate(token);
 
-        if (conf.num_tokens > MAX_NUM_TOKENS)
+        if (conf.num_tokens == null)
+        	conf.num_tokens = 1;
+        else if (conf.num_tokens > MAX_NUM_TOKENS)
             throw new ConfigurationException(String.format("A maximum number of %d tokens per node is supported", MAX_NUM_TOKENS));
 
         try
@@ -727,6 +741,11 @@ public class DatabaseDescriptor
     public static int getColumnIndexSize()
     {
         return conf.column_index_size_in_kb * 1024;
+    }
+
+    public static int getBatchSizeWarnThreshold()
+    {
+        return conf.batch_size_warn_threshold_in_kb * 1024;
     }
 
     public static Collection<String> getInitialTokens()
@@ -1326,11 +1345,6 @@ public class DatabaseDescriptor
         return conf.max_hints_delivery_threads;
     }
 
-    public static boolean getPreheatKeyCache()
-    {
-        return conf.compaction_preheat_key_cache;
-    }
-
     public static boolean isIncrementalBackupsEnabled()
     {
         return conf.incremental_backups;
@@ -1349,6 +1363,11 @@ public class DatabaseDescriptor
     public static long getTotalCommitlogSpaceInMB()
     {
         return conf.commitlog_total_space_in_mb;
+    }
+
+    public static int getSSTablePreempiveOpenIntervalInMB()
+    {
+        return conf.sstable_preemptive_open_interval_in_mb;
     }
 
     public static boolean getTrickleFsync()
@@ -1471,12 +1490,7 @@ public class DatabaseDescriptor
         return conf.inter_dc_tcp_nodelay;
     }
 
-    public static boolean shouldPreheatPageCache()
-    {
-        return conf.preheat_kernel_page_cache;
-    }
-
-    public static Pool getMemtableAllocatorPool()
+    public static MemtablePool getMemtableAllocatorPool()
     {
         long heapLimit = ((long) conf.memtable_heap_space_in_mb) << 20;
         long offHeapLimit = ((long) conf.memtable_offheap_space_in_mb) << 20;
@@ -1493,6 +1507,8 @@ public class DatabaseDescriptor
                     System.exit(-1);
                 }
                 return new SlabPool(heapLimit, offHeapLimit, conf.memtable_cleanup_threshold, new ColumnFamilyStore.FlushLargestColumnFamily());
+            case offheap_objects:
+                return new NativePool(heapLimit, offHeapLimit, conf.memtable_cleanup_threshold, new ColumnFamilyStore.FlushLargestColumnFamily());
             default:
                 throw new AssertionError();
         }

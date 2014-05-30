@@ -60,7 +60,7 @@ public class SSTableUtils
         File keyspaceDir = new File(tempdir, keyspaceName);
         keyspaceDir.mkdir();
         keyspaceDir.deleteOnExit();
-        File datafile = new File(new Descriptor(keyspaceDir, keyspaceName, cfname, generation, false).filenameFor("Data.db"));
+        File datafile = new File(new Descriptor(keyspaceDir, keyspaceName, cfname, generation, Descriptor.Type.FINAL).filenameFor("Data.db"));
         if (!datafile.createNewFile())
             throw new IOException("unable to create file " + datafile);
         datafile.deleteOnExit();
@@ -164,7 +164,7 @@ public class SSTableUtils
             for (String key : keys)
             {
                 ColumnFamily cf = ArrayBackedSortedColumns.factory.create(ksname, cfname);
-                cf.addColumn(new Cell(Util.cellname(key), ByteBufferUtil.bytes(key), 0));
+                cf.addColumn(new BufferCell(Util.cellname(key), ByteBufferUtil.bytes(key), 0));
                 map.put(key, cf);
             }
             return write(map);

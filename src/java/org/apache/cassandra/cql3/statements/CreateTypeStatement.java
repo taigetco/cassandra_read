@@ -50,9 +50,6 @@ public class CreateTypeStatement extends SchemaAlteringStatement
     {
         if (!name.hasKeyspace())
             name.setKeyspace(state.getKeyspace());
-
-        if (name.getKeyspace() == null)
-            throw new InvalidRequestException("You need to be logged in a keyspace or use a fully qualified user type name");
     }
 
     public void addDefinition(ColumnIdentifier name, CQL3Type.Raw type)
@@ -77,12 +74,12 @@ public class CreateTypeStatement extends SchemaAlteringStatement
 
     public static void checkForDuplicateNames(UserType type) throws InvalidRequestException
     {
-        for (int i = 0; i < type.types.size() - 1; i++)
+        for (int i = 0; i < type.fieldTypes.size() - 1; i++)
         {
-            ByteBuffer fieldName = type.columnNames.get(i);
-            for (int j = i+1; j < type.types.size(); j++)
+            ByteBuffer fieldName = type.fieldNames.get(i);
+            for (int j = i+1; j < type.fieldTypes.size(); j++)
             {
-                if (fieldName.equals(type.columnNames.get(j)))
+                if (fieldName.equals(type.fieldNames.get(j)))
                     throw new InvalidRequestException(String.format("Duplicate field name %s in type %s",
                                                                     UTF8Type.instance.getString(fieldName),
                                                                     UTF8Type.instance.getString(type.name)));

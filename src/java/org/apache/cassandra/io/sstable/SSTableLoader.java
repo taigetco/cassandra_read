@@ -48,6 +48,7 @@ public class SSTableLoader implements StreamEventHandler
     private final File directory;
     private final String keyspace;
     private final Client client;
+    private final int connectionsPerHost;
     private final OutputHandler outputHandler;
     private final Set<InetAddress> failedHosts = new HashSet<>();
 
@@ -61,10 +62,16 @@ public class SSTableLoader implements StreamEventHandler
 
     public SSTableLoader(File directory, Client client, OutputHandler outputHandler)
     {
+        this(directory, client, outputHandler, 1);
+    }
+
+    public SSTableLoader(File directory, Client client, OutputHandler outputHandler, int connectionsPerHost)
+    {
         this.directory = directory;
         this.keyspace = directory.getParentFile().getName();
         this.client = client;
         this.outputHandler = outputHandler;
+        this.connectionsPerHost = connectionsPerHost;
     }
 
     protected Collection<SSTableReader> openSSTables(final Map<InetAddress, Collection<Range<Token>>> ranges)
@@ -79,7 +86,7 @@ public class SSTableLoader implements StreamEventHandler
                     return false;
                 Pair<Descriptor, Component> p = SSTable.tryComponentFromFilename(dir, name);
                 Descriptor desc = p == null ? null : p.left;
-                if (p == null || !p.right.equals(Component.DATA) || desc.temporary)
+                if (p == null || !p.right.equals(Component.DATA) || desc.type.isTemporary)
                     return false;
 
                 if (!new File(desc.filenameFor(Component.PRIMARY_INDEX)).exists())
@@ -150,7 +157,7 @@ public class SSTableLoader implements StreamEventHandler
         client.init(keyspace);
         outputHandler.output("Established connection to initial hosts");
 
-        StreamPlan plan = new StreamPlan("Bulk Load");
+        StreamPlan plan = new StreamPlan("Bulk Load", 0, connectionsPerHost);
 
         Map<InetAddress, Collection<Range<Token>>> endpointToRanges = client.getEndpointToRangesMap();
         openSSTables(endpointToRanges);
@@ -168,13 +175,26 @@ public class SSTableLoader implements StreamEventHandler
             if (toIgnore.contains(remote))
                 continue;
 
-            Collection<StreamSession.SSTableStreamingSections> endpointDetails = streamingDetails.get(remote);
+            List<StreamSession.SSTableStreamingSections> endpointDetails = new LinkedList<>();
 
-            // transferSSTables assumes references have been acquired
-            for (StreamSession.SSTableStreamingSections details : endpointDetails)
-                details.sstable.acquireReference();
+            try
+            {
+                // transferSSTables assumes references have been acquired
+                for (StreamSession.SSTableStreamingSections details : streamingDetails.get(remote))
+                {
+                    if (!details.sstable.acquireReference())
+                        throw new IllegalStateException();
 
-            plan.transferFiles(remote, streamingDetails.get(remote));
+                    endpointDetails.add(details);
+                }
+
+                plan.transferFiles(remote, endpointDetails);
+            }
+            finally
+            {
+                for (StreamSession.SSTableStreamingSections details : endpointDetails)
+                    details.sstable.releaseReference();
+            }
         }
         plan.listeners(this, listeners);
         return plan.execute();

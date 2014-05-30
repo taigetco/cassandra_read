@@ -17,12 +17,18 @@
  */
 package org.apache.cassandra.transport;
 
+import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
 import io.netty.handler.codec.MessageToMessageDecoder;
 import io.netty.handler.codec.MessageToMessageEncoder;
@@ -120,6 +126,7 @@ public abstract class Message
     public final Type type;
     protected volatile Connection connection;
     private volatile int streamId;
+    private volatile Frame sourceFrame;
 
     protected Message(Type type)
     {
@@ -145,6 +152,16 @@ public abstract class Message
     public int getStreamId()
     {
         return streamId;
+    }
+
+    public void setSourceFrame(Frame sourceFrame)
+    {
+        this.sourceFrame = sourceFrame;
+    }
+
+    public Frame getSourceFrame()
+    {
+        return sourceFrame;
     }
 
     public static abstract class Request extends Message
@@ -210,6 +227,7 @@ public abstract class Message
             {
                 Message message = frame.header.type.codec.decode(frame.body, frame.header.version);
                 message.setStreamId(frame.header.streamId);
+                message.setSourceFrame(frame);
 
                 if (isRequest)
                 {
@@ -229,8 +247,9 @@ public abstract class Message
 
                 results.add(message);
             }
-            catch (Exception ex)
+            catch (Throwable ex)
             {
+                frame.release();
                 // Remember the streamId
                 throw ErrorMessage.wrap(ex, frame.header.streamId);
             }
@@ -256,24 +275,33 @@ public abstract class Message
                 UUID tracingId = ((Response)message).getTracingId();
                 if (tracingId != null)
                 {
-                    body = Unpooled.buffer(CBUtil.sizeOfUUID(tracingId) + messageSize);
+                    body = CBUtil.allocator.buffer(CBUtil.sizeOfUUID(tracingId) + messageSize);
                     CBUtil.writeUUID(tracingId, body);
                     flags.add(Frame.Header.Flag.TRACING);
                 }
                 else
                 {
-                    body = Unpooled.buffer(messageSize);
+                    body = CBUtil.allocator.buffer(messageSize);
                 }
             }
             else
             {
                 assert message instanceof Request;
-                body = Unpooled.buffer(messageSize);
+                body = CBUtil.allocator.buffer(messageSize);
                 if (((Request)message).isTracingRequested())
                     flags.add(Frame.Header.Flag.TRACING);
             }
 
-            codec.encode(message, body, version);
+            try
+            {
+                codec.encode(message, body, version);
+            }
+            catch (Throwable e)
+            {
+                body.release();
+                throw ErrorMessage.wrap(e, message.getStreamId());
+            }
+
             results.add(Frame.create(message.type, message.getStreamId(), version, flags, body));
         }
     }
@@ -281,31 +309,134 @@ public abstract class Message
     @ChannelHandler.Sharable
     public static class Dispatcher extends SimpleChannelInboundHandler<Request>
     {
+        private static class FlushItem
+        {
+            final ChannelHandlerContext ctx;
+            final Response response;
+            private FlushItem(ChannelHandlerContext ctx, Response response)
+            {
+                this.ctx = ctx;
+                this.response = response;
+            }
+        }
+
+        private final class Flusher implements Runnable
+        {
+            final EventLoop eventLoop;
+            final ConcurrentLinkedQueue<FlushItem> queued = new ConcurrentLinkedQueue<>();
+            final AtomicBoolean running = new AtomicBoolean(false);
+            final HashSet<ChannelHandlerContext> channels = new HashSet<>();
+            final List<FlushItem> flushed = new ArrayList<>();
+            int runsSinceFlush = 0;
+            int runsWithNoWork = 0;
+            private Flusher(EventLoop eventLoop)
+            {
+                this.eventLoop = eventLoop;
+            }
+            void start()
+            {
+                if (running.compareAndSet(false, true))
+                {
+                    this.eventLoop.execute(this);
+                }
+            }
+            public void run()
+            {
+
+                boolean doneWork = false;
+                FlushItem flush;
+                while ( null != (flush = queued.poll()) )
+                {
+                    channels.add(flush.ctx);
+                    flush.ctx.write(flush.response, flush.ctx.voidPromise());
+                    flushed.add(flush);
+                    doneWork = true;
+                }
+
+                runsSinceFlush++;
+
+                if (!doneWork || runsSinceFlush > 2 || flushed.size() > 50)
+                {
+                    for (ChannelHandlerContext channel : channels)
+                        channel.flush();
+                    for (FlushItem item : flushed)
+                    {
+                        if (item.response.getSourceFrame().body.refCnt() > 0)
+                            item.response.getSourceFrame().release();
+                    }
+                    channels.clear();
+                    flushed.clear();
+                    runsSinceFlush = 0;
+                }
+
+                if (doneWork)
+                {
+                    runsWithNoWork = 0;
+                }
+                else
+                {
+                    // either reschedule or cancel
+                    if (++runsWithNoWork > 5)
+                    {
+                        running.set(false);
+                        if (queued.isEmpty() || !running.compareAndSet(false, true))
+                            return;
+                    }
+                }
+
+                eventLoop.schedule(this, 10000, TimeUnit.NANOSECONDS);
+            }
+        }
+
+        private static final ConcurrentMap<EventLoop, Flusher> flusherLookup = new ConcurrentHashMap<>();
+
+        public Dispatcher()
+        {
+            super(false);
+        }
+
         @Override
         public void channelRead0(ChannelHandlerContext ctx, Request request)
         {
+
+            final Response response;
+            final ServerConnection connection;
+
             try
             {
                 assert request.connection() instanceof ServerConnection;
-                ServerConnection connection = (ServerConnection)request.connection();
+                connection = (ServerConnection)request.connection();
                 QueryState qstate = connection.validateNewMessage(request.type, connection.getVersion(), request.getStreamId());
 
                 logger.debug("Received: {}, v={}", request, connection.getVersion());
 
-                Response response = request.execute(qstate);
+                response = request.execute(qstate);
                 response.setStreamId(request.getStreamId());
                 response.attach(connection);
+                response.setSourceFrame(request.getSourceFrame());
                 connection.applyStateTransition(request.type, response.type);
-
-                logger.debug("Responding: {}, v={}", response, connection.getVersion());
-
-                ctx.channel().writeAndFlush(response);
             }
-            catch (Exception ex)
+            catch (Throwable ex)
             {
+                request.getSourceFrame().release();
                 // Don't let the exception propagate to exceptionCaught() if we can help it so that we can assign the right streamID.
-                ctx.channel().writeAndFlush(ErrorMessage.fromException(ex).setStreamId(request.getStreamId()));
+                ctx.writeAndFlush(ErrorMessage.fromException(ex).setStreamId(request.getStreamId()), ctx.voidPromise());
+                return;
             }
+
+            logger.debug("Responding: {}, v={}", response, connection.getVersion());
+
+            EventLoop loop = ctx.channel().eventLoop();
+            Flusher flusher = flusherLookup.get(loop);
+            if (flusher == null)
+            {
+                Flusher alt = flusherLookup.putIfAbsent(loop, flusher = new Flusher(loop));
+                if (alt != null)
+                    flusher = alt;
+            }
+
+            flusher.queued.add(new FlushItem(ctx, response));
+            flusher.start();
         }
 
         @Override
@@ -314,13 +445,13 @@ public abstract class Message
         {
             if (ctx.channel().isOpen())
             {
-                ChannelFuture future = ctx.channel().writeAndFlush(ErrorMessage.fromException(cause));
+                ChannelFuture future = ctx.writeAndFlush(ErrorMessage.fromException(cause));
                 // On protocol exception, close the channel as soon as the message have been sent
                 if (cause instanceof ProtocolException)
                 {
                     future.addListener(new ChannelFutureListener() {
                         public void operationComplete(ChannelFuture future) {
-                            ctx.channel().close();
+                            ctx.close();
                         }
                     });
                 }

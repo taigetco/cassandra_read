@@ -31,7 +31,7 @@ import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.db.ArrayBackedSortedColumns;
-import org.apache.cassandra.db.Cell;
+import org.apache.cassandra.db.BufferCell;
 import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.Mutation;
@@ -289,7 +289,7 @@ public class TriggersTest extends SchemaLoader
 
     private void assertUpdateIsAugmented(int key)
     {
-        UntypedResultSet rs = QueryProcessor.processInternal(
+        UntypedResultSet rs = QueryProcessor.executeInternal(
                                 String.format("SELECT * FROM %s.%s WHERE k=%s", ksName, cfName, key));
         assertTrue(String.format("Expected value (%s) for augmented cell v2 was not found", key), rs.one().has("v2"));
         assertEquals(999, rs.one().getInt("v2"));
@@ -297,7 +297,7 @@ public class TriggersTest extends SchemaLoader
 
     private void assertUpdateNotExecuted(String cf, int key)
     {
-        UntypedResultSet rs = QueryProcessor.processInternal(
+        UntypedResultSet rs = QueryProcessor.executeInternal(
                 String.format("SELECT * FROM %s.%s WHERE k=%s", ksName, cf, key));
         assertTrue(rs.isEmpty());
     }
@@ -316,11 +316,8 @@ public class TriggersTest extends SchemaLoader
         public Collection<Mutation> augment(ByteBuffer key, ColumnFamily update)
         {
             ColumnFamily extraUpdate = update.cloneMeShallow(ArrayBackedSortedColumns.factory, false);
-            extraUpdate.addColumn(new Cell(update.metadata().comparator.makeCellName(bytes("v2")),
-                                           bytes(999)));
-            Mutation mutation = new Mutation(ksName, key);
-            mutation.add(extraUpdate);
-            return Collections.singletonList(mutation);
+            extraUpdate.addColumn(new BufferCell(update.metadata().comparator.makeCellName(bytes("v2")), bytes(999)));
+            return Collections.singletonList(new Mutation(ksName, key, extraUpdate));
         }
     }
 
@@ -329,13 +326,10 @@ public class TriggersTest extends SchemaLoader
         public Collection<Mutation> augment(ByteBuffer key, ColumnFamily update)
         {
             ColumnFamily extraUpdate = update.cloneMeShallow(ArrayBackedSortedColumns.factory, false);
-            extraUpdate.addColumn(new Cell(update.metadata().comparator.makeCellName(bytes("v2")),
-                                           bytes(999)));
+            extraUpdate.addColumn(new BufferCell(update.metadata().comparator.makeCellName(bytes("v2")), bytes(999)));
 
             int newKey = toInt(key) + 1000;
-            Mutation mutation = new Mutation(ksName, bytes(newKey));
-            mutation.add(extraUpdate);
-            return Collections.singletonList(mutation);
+            return Collections.singletonList(new Mutation(ksName, bytes(newKey), extraUpdate));
         }
     }
 
@@ -344,12 +338,8 @@ public class TriggersTest extends SchemaLoader
         public Collection<Mutation> augment(ByteBuffer key, ColumnFamily update)
         {
             ColumnFamily extraUpdate = ArrayBackedSortedColumns.factory.create(ksName, otherCf);
-            extraUpdate.addColumn(new Cell(extraUpdate.metadata().comparator.makeCellName(bytes("v2")),
-                                           bytes(999)));
-
-            Mutation mutation = new Mutation(ksName, key);
-            mutation.add(extraUpdate);
-            return Collections.singletonList(mutation);
+            extraUpdate.addColumn(new BufferCell(extraUpdate.metadata().comparator.makeCellName(bytes("v2")), bytes(999)));
+            return Collections.singletonList(new Mutation(ksName, key, extraUpdate));
         }
     }
 }

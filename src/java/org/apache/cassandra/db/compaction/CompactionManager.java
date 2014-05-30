@@ -42,9 +42,11 @@ import javax.management.ObjectName;
 import javax.management.openmbean.OpenDataException;
 import javax.management.openmbean.TabularData;
 
+import com.google.common.base.Predicate;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ConcurrentHashMultiset;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Multimap;
@@ -56,6 +58,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.cache.AutoSavingCache;
 import org.apache.cassandra.concurrent.DebuggableThreadPoolExecutor;
+import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -74,6 +77,7 @@ import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.SSTableIdentityIterator;
 import org.apache.cassandra.io.sstable.SSTableReader;
+import org.apache.cassandra.io.sstable.SSTableRewriter;
 import org.apache.cassandra.io.sstable.SSTableWriter;
 import org.apache.cassandra.io.sstable.metadata.MetadataCollector;
 import org.apache.cassandra.io.util.FileUtils;
@@ -238,127 +242,130 @@ public class CompactionManager implements CompactionManagerMBean
         }
     }
 
-    private abstract static class UnmarkingRunnable implements Runnable
+    private AllSSTableOpStatus parallelAllSSTableOperation(final ColumnFamilyStore cfs, final OneSSTableOperation operation) throws ExecutionException, InterruptedException
     {
-        private final ColumnFamilyStore cfs;
-        private final Iterable<SSTableReader> sstables;
-
-        private UnmarkingRunnable(ColumnFamilyStore cfs, Iterable<SSTableReader> sstables)
+        Iterable<SSTableReader> compactingSSTables = cfs.markAllCompacting();
+        if (compactingSSTables == null)
         {
-            this.cfs = cfs;
-            this.sstables = sstables;
+            logger.info("Aborting operation on {}.{} after failing to interrupt other compaction operations", cfs.keyspace.getName(), cfs.name);
+            return AllSSTableOpStatus.ABORTED;
         }
-
-        protected abstract void runMayThrow() throws IOException;
-
-        public final void run()
+        if (Iterables.isEmpty(compactingSSTables))
         {
-            try
-            {
-                runMayThrow();
-            }
-            catch (Exception e)
-            {
-                throw Throwables.propagate(e);
-            }
-            finally
-            {
-                cfs.getDataTracker().unmarkCompacting(sstables);
-            }
+            logger.info("No sstables for {}.{}", cfs.keyspace.getName(), cfs.name);
+            return AllSSTableOpStatus.SUCCESSFUL;
         }
+        try
+        {
+            Iterable<SSTableReader> sstables = operation.filterSSTables(compactingSSTables);
+            List<Future<Object>> futures = new ArrayList<>();
+
+            for (final SSTableReader sstable : sstables)
+            {
+                futures.add(executor.submit(new Callable<Object>()
+                {
+                    @Override
+                    public Object call() throws Exception
+                    {
+                        operation.execute(sstable);
+                        return this;
+                    }
+                }));
+            }
+
+            for (Future<Object> f : futures)
+                f.get();
+        }
+        finally
+        {
+            cfs.getDataTracker().unmarkCompacting(compactingSSTables);
+        }
+        return AllSSTableOpStatus.SUCCESSFUL;
+    }
+
+    private static interface OneSSTableOperation
+    {
+        Iterable<SSTableReader> filterSSTables(Iterable<SSTableReader> input);
+        void execute(SSTableReader input) throws IOException;
     }
 
     public enum AllSSTableOpStatus { ABORTED, SUCCESSFUL }
 
     public AllSSTableOpStatus performScrub(final ColumnFamilyStore cfs, final boolean skipCorrupted) throws InterruptedException, ExecutionException
     {
-        final Iterable<SSTableReader> sstables = cfs.markAllCompacting();
-        if (sstables == null)
+        assert !cfs.isIndex();
+        return parallelAllSSTableOperation(cfs, new OneSSTableOperation()
         {
-            logger.info("Aborting scrub of {}.{} after failing to interrupt other compaction operations", cfs.keyspace.getName(), cfs.name);
-            return AllSSTableOpStatus.ABORTED;
-        }
-        if (Iterables.isEmpty(sstables))
-        {
-            logger.info("No sstables to scrub for {}.{}", cfs.keyspace.getName(), cfs.name);
-            return AllSSTableOpStatus.SUCCESSFUL;
-        }
-
-        Runnable runnable = new UnmarkingRunnable(cfs, sstables)
-        {
-            protected void runMayThrow() throws IOException
+            @Override
+            public Iterable<SSTableReader> filterSSTables(Iterable<SSTableReader> input)
             {
-                doScrub(cfs, sstables, skipCorrupted);
+                return input;
             }
-        };
-        executor.submit(runnable).get();
-        return AllSSTableOpStatus.SUCCESSFUL;
+
+            @Override
+            public void execute(SSTableReader input) throws IOException
+            {
+                scrubOne(cfs, input, skipCorrupted);
+            }
+        });
     }
 
     public AllSSTableOpStatus performSSTableRewrite(final ColumnFamilyStore cfs, final boolean excludeCurrentVersion) throws InterruptedException, ExecutionException
     {
-        final Iterable<SSTableReader> sstables = cfs.markAllCompacting();
-        if (sstables == null)
+        return parallelAllSSTableOperation(cfs, new OneSSTableOperation()
         {
-            logger.info("Aborting sstable format upgrade of {}.{} after failing to interrupt other compaction operations", cfs.keyspace.getName(), cfs.name);
-            return AllSSTableOpStatus.ABORTED;
-        }
-        if (Iterables.isEmpty(sstables))
-        {
-            logger.info("No sstables to upgrade for {}.{}", cfs.keyspace.getName(), cfs.name);
-            return AllSSTableOpStatus.SUCCESSFUL;
-        }
-
-        Runnable runnable = new UnmarkingRunnable(cfs, sstables)
-        {
-            protected void runMayThrow() throws IOException
+            @Override
+            public Iterable<SSTableReader> filterSSTables(Iterable<SSTableReader> input)
             {
-                for (final SSTableReader sstable : sstables)
+                return Iterables.filter(input, new Predicate<SSTableReader>()
                 {
-                    if (excludeCurrentVersion && sstable.descriptor.version.equals(Descriptor.Version.CURRENT))
-                        continue;
-
-                    // SSTables are marked by the caller
-                    // NOTE: it is important that the task create one and only one sstable, even for Leveled compaction (see LeveledManifest.replace())
-                    AbstractCompactionTask task = cfs.getCompactionStrategy().getCompactionTask(Collections.singleton(sstable), NO_GC, Long.MAX_VALUE);
-                    task.setUserDefined(true);
-                    task.setCompactionType(OperationType.UPGRADE_SSTABLES);
-                    task.execute(metrics);
-                }
+                    @Override
+                    public boolean apply(SSTableReader sstable)
+                    {
+                        return !(excludeCurrentVersion && sstable.descriptor.version.equals(Descriptor.Version.CURRENT));
+                    }
+                });
             }
-        };
-        executor.submit(runnable).get();
-        return AllSSTableOpStatus.SUCCESSFUL;
+
+            @Override
+            public void execute(SSTableReader input) throws IOException
+            {
+                AbstractCompactionTask task = cfs.getCompactionStrategy().getCompactionTask(Collections.singleton(input), NO_GC, Long.MAX_VALUE);
+                task.setUserDefined(true);
+                task.setCompactionType(OperationType.UPGRADE_SSTABLES);
+                task.execute(metrics);
+            }
+        });
     }
 
     public AllSSTableOpStatus performCleanup(final ColumnFamilyStore cfStore) throws InterruptedException, ExecutionException
     {
-        final Iterable<SSTableReader> sstables = cfStore.markAllCompacting();
-        if (sstables == null)
+        assert !cfStore.isIndex();
+        Keyspace keyspace = cfStore.keyspace;
+        final Collection<Range<Token>> ranges = StorageService.instance.getLocalRanges(keyspace.getName());
+        if (ranges.isEmpty())
         {
-            logger.info("Aborting cleanup of {}.{} after failing to interrupt other compaction operations", cfStore.keyspace.getName(), cfStore.name);
+            logger.info("Cleanup cannot run before a node has joined the ring");
             return AllSSTableOpStatus.ABORTED;
         }
-        if (Iterables.isEmpty(sstables))
+        final boolean hasIndexes = cfStore.indexManager.hasIndexes();
+        final CleanupStrategy cleanupStrategy = CleanupStrategy.get(cfStore, ranges);
+        return parallelAllSSTableOperation(cfStore, new OneSSTableOperation()
         {
-            logger.info("No sstables to cleanup for {}.{}", cfStore.keyspace.getName(), cfStore.name);
-            return AllSSTableOpStatus.SUCCESSFUL;
-        }
-
-        Runnable runnable = new UnmarkingRunnable(cfStore, sstables)
-        {
-            protected void runMayThrow() throws IOException
+            @Override
+            public Iterable<SSTableReader> filterSSTables(Iterable<SSTableReader> input)
             {
-                // Sort the column families in order of SSTable size, so cleanup of smaller CFs
-                // can free up space for larger ones
-                List<SSTableReader> sortedSSTables = Lists.newArrayList(sstables);
+                List<SSTableReader> sortedSSTables = Lists.newArrayList(input);
                 Collections.sort(sortedSSTables, new SSTableReader.SizeComparator());
-
-                doCleanupCompaction(cfStore, sortedSSTables);
+                return sortedSSTables;
             }
-        };
-        executor.submit(runnable).get();
-        return AllSSTableOpStatus.SUCCESSFUL;
+
+            @Override
+            public void execute(SSTableReader input) throws IOException
+            {
+                doCleanupOne(cfStore, input, cleanupStrategy, ranges, hasIndexes);
+            }
+        });
     }
 
     public Future<?> submitAntiCompaction(final ColumnFamilyStore cfs,
@@ -400,7 +407,7 @@ public class CompactionManager implements CompactionManagerMBean
             SSTableReader sstable = sstableIterator.next();
             for (Range<Token> r : Range.normalize(ranges))
             {
-                Range<Token> sstableRange = new Range<>(sstable.first.token, sstable.last.token, sstable.partitioner);
+                Range<Token> sstableRange = new Range<>(sstable.first.getToken(), sstable.last.getToken(), sstable.partitioner);
                 if (r.contains(sstableRange))
                 {
                     logger.info("SSTable {} fully contained in range {}, mutating repairedAt instead of anticompacting", sstable, r);
@@ -424,12 +431,8 @@ public class CompactionManager implements CompactionManagerMBean
         }
         cfs.getDataTracker().notifySSTableRepairedStatusChanged(mutatedRepairStatuses);
         cfs.getDataTracker().unmarkCompacting(Sets.union(nonAnticompacting, mutatedRepairStatuses));
-        Collection<SSTableReader> antiCompactedSSTables = null;
         if (!sstables.isEmpty())
-            antiCompactedSSTables = doAntiCompaction(cfs, ranges, sstables, repairedAt);
-        // verify that there are tables to be swapped, otherwise CFS#replaceCompactedSSTables will hang.
-        if (antiCompactedSSTables != null && antiCompactedSSTables.size() > 0)
-            cfs.replaceCompactedSSTables(sstables, antiCompactedSSTables, OperationType.ANTICOMPACTION);
+            doAntiCompaction(cfs, ranges, sstables, repairedAt);
         SSTableReader.releaseReferences(sstables);
         cfs.getDataTracker().unmarkCompacting(sstables);
         logger.info(String.format("Completed anticompaction successfully"));
@@ -569,23 +572,9 @@ public class CompactionManager implements CompactionManagerMBean
         }
     }
 
-    /**
-     * Deserialize everything in the CFS and re-serialize w/ the newest version.  Also attempts to recover
-     * from bogus row keys / sizes using data from the index, and skips rows with garbage columns that resulted
-     * from early ByteBuffer bugs.
-     *
-     * @throws IOException
-     */
-    private void doScrub(ColumnFamilyStore cfs, Iterable<SSTableReader> sstables, boolean skipCorrupted) throws IOException
-    {
-        assert !cfs.isIndex();
-        for (final SSTableReader sstable : sstables)
-            scrubOne(cfs, sstable, skipCorrupted);
-    }
-
     private void scrubOne(ColumnFamilyStore cfs, SSTableReader sstable, boolean skipCorrupted) throws IOException
     {
-        Scrubber scrubber = new Scrubber(cfs, sstable, skipCorrupted);
+        Scrubber scrubber = new Scrubber(cfs, sstable, skipCorrupted, false);
 
         CompactionInfo.Holder scrubInfo = scrubber.getScrubInfo();
         metrics.beginCompaction(scrubInfo);
@@ -598,14 +587,6 @@ public class CompactionManager implements CompactionManagerMBean
             scrubber.close();
             metrics.finishCompaction(scrubInfo);
         }
-
-        if (scrubber.getNewInOrderSSTable() != null)
-            cfs.addSSTable(scrubber.getNewInOrderSSTable());
-
-        if (scrubber.getNewSSTable() == null)
-            cfs.markObsolete(Collections.singletonList(sstable), OperationType.SCRUB);
-        else
-            cfs.replaceCompactedSSTables(Collections.singletonList(sstable), Collections.singletonList(scrubber.getNewSSTable()), OperationType.SCRUB);
     }
 
     /**
@@ -622,7 +603,7 @@ public class CompactionManager implements CompactionManagerMBean
         // see if there are any keys LTE the token for the start of the first range
         // (token range ownership is exclusive on the LHS.)
         Range<Token> firstRange = sortedRanges.get(0);
-        if (sstable.first.token.compareTo(firstRange.left) <= 0)
+        if (sstable.first.getToken().compareTo(firstRange.left) <= 0)
             return true;
 
         // then, iterate over all owned ranges and see if the next key beyond the end of the owned
@@ -651,7 +632,7 @@ public class CompactionManager implements CompactionManagerMBean
             }
 
             Range<Token> nextRange = sortedRanges.get(i + 1);
-            if (!nextRange.contains(firstBeyondRange.token))
+            if (!nextRange.contains(firstBeyondRange.getToken()))
             {
                 // we found a key in between the owned ranges
                 return true;
@@ -662,114 +643,94 @@ public class CompactionManager implements CompactionManagerMBean
     }
 
     /**
-     * This function goes over each file and removes the keys that the node is not responsible for
+     * This function goes over a file and removes the keys that the node is not responsible for
      * and only keeps keys that this node is responsible for.
      *
      * @throws IOException
      */
-    private void doCleanupCompaction(final ColumnFamilyStore cfs, Collection<SSTableReader> sstables) throws IOException
+    private void doCleanupOne(final ColumnFamilyStore cfs, SSTableReader sstable, CleanupStrategy cleanupStrategy, Collection<Range<Token>> ranges, boolean hasIndexes) throws IOException
     {
         assert !cfs.isIndex();
-        Keyspace keyspace = cfs.keyspace;
-        Collection<Range<Token>> ranges = StorageService.instance.getLocalRanges(keyspace.getName());
-        if (ranges.isEmpty())
+
+        if (!hasIndexes && !new Bounds<>(sstable.first.getToken(), sstable.last.getToken()).intersects(ranges))
         {
-            logger.info("Cleanup cannot run before a node has joined the ring");
+            cfs.getDataTracker().markCompactedSSTablesReplaced(Arrays.asList(sstable), Collections.<SSTableReader>emptyList(), OperationType.CLEANUP);
+            return;
+        }
+        if (!needsCleanup(sstable, ranges))
+        {
+            logger.debug("Skipping {} for cleanup; all rows should be kept", sstable);
             return;
         }
 
-        boolean hasIndexes = cfs.indexManager.hasIndexes();
-        CleanupStrategy cleanupStrategy = CleanupStrategy.get(cfs, ranges);
+        long start = System.nanoTime();
 
-        for (SSTableReader sstable : sstables)
+        long totalkeysWritten = 0;
+
+        int expectedBloomFilterSize = Math.max(cfs.metadata.getMinIndexInterval(),
+                                               (int) (SSTableReader.getApproximateKeyCount(Arrays.asList(sstable))));
+        if (logger.isDebugEnabled())
+            logger.debug("Expected bloom filter size : {}", expectedBloomFilterSize);
+
+        logger.info("Cleaning up {}", sstable);
+
+        File compactionFileLocation = cfs.directories.getDirectoryForCompactedSSTables();
+        if (compactionFileLocation == null)
+            throw new IOException("disk full");
+
+        ICompactionScanner scanner = cleanupStrategy.getScanner(sstable, getRateLimiter());
+        CleanupInfo ci = new CleanupInfo(sstable, scanner);
+
+        metrics.beginCompaction(ci);
+        SSTableRewriter writer = new SSTableRewriter(cfs, new HashSet<>(ImmutableSet.of(sstable)), sstable.maxDataAge, OperationType.CLEANUP, false);
+
+        try (CompactionController controller = new CompactionController(cfs, Collections.singleton(sstable), getDefaultGcBefore(cfs)))
         {
-            if (!hasIndexes && !new Bounds<Token>(sstable.first.token, sstable.last.token).intersects(ranges))
+            writer.switchWriter(createWriter(cfs, compactionFileLocation, expectedBloomFilterSize, sstable.getSSTableMetadata().repairedAt, sstable));
+
+            while (scanner.hasNext())
             {
-                cfs.replaceCompactedSSTables(Arrays.asList(sstable), Collections.<SSTableReader>emptyList(), OperationType.CLEANUP);
-                continue;
-            }
-            if (!needsCleanup(sstable, ranges))
-            {
-                logger.debug("Skipping {} for cleanup; all rows should be kept", sstable);
-                continue;
-            }
+                if (ci.isStopRequested())
+                    throw new CompactionInterruptedException(ci.getCompactionInfo());
 
-            CompactionController controller = new CompactionController(cfs, Collections.singleton(sstable), getDefaultGcBefore(cfs));
-            long start = System.nanoTime();
-
-            long totalkeysWritten = 0;
-
-            int expectedBloomFilterSize = Math.max(cfs.metadata.getMinIndexInterval(),
-                                                   (int) (SSTableReader.getApproximateKeyCount(Arrays.asList(sstable))));
-            if (logger.isDebugEnabled())
-                logger.debug("Expected bloom filter size : {}", expectedBloomFilterSize);
-
-            logger.info("Cleaning up {}", sstable);
-
-            File compactionFileLocation = cfs.directories.getDirectoryForCompactedSSTables();
-            if (compactionFileLocation == null)
-                throw new IOException("disk full");
-
-            ICompactionScanner scanner = cleanupStrategy.getScanner(sstable, getRateLimiter());
-            CleanupInfo ci = new CleanupInfo(sstable, scanner);
-
-            metrics.beginCompaction(ci);
-            SSTableWriter writer = createWriter(cfs,
-                                                compactionFileLocation,
-                                                expectedBloomFilterSize,
-                                                sstable.getSSTableMetadata().repairedAt,
-                                                sstable);
-            SSTableReader newSstable = null;
-            try
-            {
-                while (scanner.hasNext())
-                {
-                    if (ci.isStopRequested())
-                        throw new CompactionInterruptedException(ci.getCompactionInfo());
-                    SSTableIdentityIterator row = (SSTableIdentityIterator) scanner.next();
-
-                    row = cleanupStrategy.cleanup(row);
-                    if (row == null)
-                        continue;
-                    AbstractCompactedRow compactedRow = new LazilyCompactedRow(controller, Collections.singletonList(row));
-                    if (writer.append(compactedRow) != null)
-                        totalkeysWritten++;
-                }
-                if (totalkeysWritten > 0)
-                    newSstable = writer.closeAndOpenReader(sstable.maxDataAge);
-                else
-                    writer.abort();
-            }
-            catch (Throwable e)
-            {
-                writer.abort();
-                throw Throwables.propagate(e);
-            }
-            finally
-            {
-                controller.close();
-                scanner.close();
-                metrics.finishCompaction(ci);
-            }
-
-            List<SSTableReader> results = new ArrayList<SSTableReader>(1);
-            if (newSstable != null)
-            {
-                results.add(newSstable);
-
-                String format = "Cleaned up to %s.  %,d to %,d (~%d%% of original) bytes for %,d keys.  Time: %,dms.";
-                long dTime = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
-                long startsize = sstable.onDiskLength();
-                long endsize = newSstable.onDiskLength();
-                double ratio = (double) endsize / (double) startsize;
-                logger.info(String.format(format, writer.getFilename(), startsize, endsize, (int) (ratio * 100), totalkeysWritten, dTime));
+                SSTableIdentityIterator row = (SSTableIdentityIterator) scanner.next();
+                row = cleanupStrategy.cleanup(row);
+                if (row == null)
+                    continue;
+                AbstractCompactedRow compactedRow = new LazilyCompactedRow(controller, Collections.singletonList(row));
+                if (writer.append(compactedRow) != null)
+                    totalkeysWritten++;
             }
 
             // flush to ensure we don't lose the tombstones on a restart, since they are not commitlog'd
             cfs.indexManager.flushIndexesBlocking();
 
-            cfs.replaceCompactedSSTables(Arrays.asList(sstable), results, OperationType.CLEANUP);
+            writer.finish();
         }
+        catch (Throwable e)
+        {
+            writer.abort();
+            throw Throwables.propagate(e);
+        }
+        finally
+        {
+            scanner.close();
+            metrics.finishCompaction(ci);
+        }
+
+        List<SSTableReader> results = writer.finished();
+        if (!results.isEmpty())
+        {
+            String format = "Cleaned up to %s.  %,d to %,d (~%d%% of original) bytes for %,d keys.  Time: %,dms.";
+            long dTime = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+            long startsize = sstable.onDiskLength();
+            long endsize = 0;
+            for (SSTableReader newSstable : results)
+                endsize += newSstable.onDiskLength();
+            double ratio = (double) endsize / (double) startsize;
+            logger.info(String.format(format, results.get(0).getFilename(), startsize, endsize, (int) (ratio * 100), totalkeysWritten, dTime));
+        }
+
     }
 
     private static abstract class CleanupStrategy
@@ -836,7 +797,7 @@ public class CompactionManager implements CompactionManagerMBean
             @Override
             public SSTableIdentityIterator cleanup(SSTableIdentityIterator row)
             {
-                if (Range.isInRanges(row.getKey().token, ranges))
+                if (Range.isInRanges(row.getKey().getToken(), ranges))
                     return row;
 
                 cfs.invalidateCachedRow(row.getKey());
@@ -989,14 +950,21 @@ public class CompactionManager implements CompactionManagerMBean
             }
 
             logger.info("Anticompacting {}", sstable);
+            Set<SSTableReader> sstableAsSet = new HashSet<>();
+            sstableAsSet.add(sstable);
+
             File destination = cfs.directories.getDirectoryForCompactedSSTables();
-            SSTableWriter repairedSSTableWriter = CompactionManager.createWriter(cfs, destination, expectedBloomFilterSize, repairedAt, sstable);
-            SSTableWriter unRepairedSSTableWriter = CompactionManager.createWriter(cfs, destination, expectedBloomFilterSize, ActiveRepairService.UNREPAIRED_SSTABLE, sstable);
+            SSTableRewriter repairedSSTableWriter = new SSTableRewriter(cfs, sstableAsSet, sstable.maxDataAge, OperationType.ANTICOMPACTION, false);
+            SSTableRewriter unRepairedSSTableWriter = new SSTableRewriter(cfs, sstableAsSet, sstable.maxDataAge, OperationType.ANTICOMPACTION, false);
+
+            AbstractCompactionStrategy strategy = cfs.getCompactionStrategy();
+            List<ICompactionScanner> scanners = strategy.getScanners(Arrays.asList(sstable));
 
             try (CompactionController controller = new CompactionController(cfs, new HashSet<>(Collections.singleton(sstable)), CFMetaData.DEFAULT_GC_GRACE_SECONDS))
             {
-                AbstractCompactionStrategy strategy = cfs.getCompactionStrategy();
-                List<ICompactionScanner> scanners = strategy.getScanners(Arrays.asList(sstable));
+                repairedSSTableWriter.switchWriter(CompactionManager.createWriter(cfs, destination, expectedBloomFilterSize, repairedAt, sstable));
+                unRepairedSSTableWriter.switchWriter(CompactionManager.createWriter(cfs, destination, expectedBloomFilterSize, ActiveRepairService.UNREPAIRED_SSTABLE, sstable));
+
                 CompactionIterable ci = new CompactionIterable(OperationType.ANTICOMPACTION, scanners, controller);
 
                 try (CloseableIterator<AbstractCompactedRow> iter = ci.iterator())
@@ -1005,7 +973,7 @@ public class CompactionManager implements CompactionManagerMBean
                     {
                         AbstractCompactedRow row = iter.next();
                         // if current range from sstable is repaired, save it into the new repaired sstable
-                        if (Range.isInRanges(row.key.token, ranges))
+                        if (Range.isInRanges(row.key.getToken(), ranges))
                         {
                             repairedSSTableWriter.append(row);
                             repairedKeyCount++;
@@ -1018,16 +986,13 @@ public class CompactionManager implements CompactionManagerMBean
                         }
                     }
                 }
+                // we have the same readers being rewritten by both writers, so we ask the first one NOT to close them
+                // so that the second one can do so safely, without leaving us with references < 0 or any other ugliness
+                repairedSSTableWriter.finish(false, repairedAt);
+                unRepairedSSTableWriter.finish(ActiveRepairService.UNREPAIRED_SSTABLE);
                 // add repaired table with a non-null timestamp field to be saved in SSTableMetadata#repairedAt
-                if (repairedKeyCount > 0)
-                    anticompactedSSTables.add(repairedSSTableWriter.closeAndOpenReader(sstable.maxDataAge));
-                else
-                    repairedSSTableWriter.abort();
-                // supply null as we keep SSTableMetadata#repairedAt empty if the table isn't repaired
-                if (unrepairedKeyCount > 0)
-                    anticompactedSSTables.add(unRepairedSSTableWriter.closeAndOpenReader(sstable.maxDataAge));
-                else
-                    unRepairedSSTableWriter.abort();
+                anticompactedSSTables.addAll(repairedSSTableWriter.finished());
+                anticompactedSSTables.addAll(unRepairedSSTableWriter.finished());
             }
             catch (Throwable e)
             {
@@ -1153,12 +1118,11 @@ public class CompactionManager implements CompactionManagerMBean
         return CompactionMetrics.getCompactions().size();
     }
 
-    private static class CompactionExecutor extends ThreadPoolExecutor
+    private static class CompactionExecutor extends JMXEnabledThreadPoolExecutor
     {
         protected CompactionExecutor(int minThreads, int maxThreads, String name, BlockingQueue<Runnable> queue)
         {
-            super(minThreads, maxThreads, 60, TimeUnit.SECONDS, queue, new NamedThreadFactory(name, Thread.MIN_PRIORITY));
-            allowCoreThreadTimeOut(true);
+            super(minThreads, maxThreads, 60, TimeUnit.SECONDS, queue, new NamedThreadFactory(name, Thread.MIN_PRIORITY), "internal");
         }
 
         private CompactionExecutor(int threadCount, String name)

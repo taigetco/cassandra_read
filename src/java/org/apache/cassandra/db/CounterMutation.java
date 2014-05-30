@@ -200,9 +200,9 @@ public class CounterMutation implements IMutation
             long clock = currentValue.clock + 1L;
             long count = currentValue.count + update.delta();
 
-            resultCF.addColumn(new CounterCell(update.name(),
-                                               CounterContext.instance().createGlobal(CounterId.getLocalId(), clock, count),
-                                               update.timestamp()));
+            resultCF.addColumn(new BufferCounterCell(update.name(),
+                                                     CounterContext.instance().createGlobal(CounterId.getLocalId(), clock, count),
+                                                     update.timestamp()));
         }
 
         return resultCF;
@@ -253,7 +253,7 @@ public class CounterMutation implements IMutation
         SortedSet<CellName> names = new TreeSet<>(cfs.metadata.comparator);
         for (int i = 0; i < currentValues.length; i++)
             if (currentValues[i] == null)
-                names.add(counterUpdateCells.get(i).name);
+                names.add(counterUpdateCells.get(i).name());
 
         ReadCommand cmd = new SliceByNamesReadCommand(getKeyspaceName(), key(), cfs.metadata.cfName, Long.MIN_VALUE, new NamesQueryFilter(names));
         Row row = cmd.getRow(cfs.keyspace);
@@ -265,7 +265,7 @@ public class CounterMutation implements IMutation
                 continue;
 
             Cell cell = cf == null ? null : cf.getColumn(counterUpdateCells.get(i).name());
-            if (cell == null || cell.isMarkedForDelete(Long.MIN_VALUE)) // absent or a tombstone.
+            if (cell == null || !cell.isLive()) // absent or a tombstone.
                 currentValues[i] = ClockAndCount.BLANK;
             else
                 currentValues[i] = CounterContext.instance().getLocalClockAndCount(cell.value());

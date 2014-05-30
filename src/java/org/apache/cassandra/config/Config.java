@@ -130,8 +130,9 @@ public class Config
 
     /* if the size of columns or super-columns are more than this, indexing will kick in */
     public Integer column_index_size_in_kb = 64;
+    public Integer batch_size_warn_threshold_in_kb = 5;
     public Integer in_memory_compaction_limit_in_mb = 64;
-    public Integer concurrent_compactors = FBUtilities.getAvailableProcessors();
+    public Integer concurrent_compactors;
     public volatile Integer compaction_throughput_mb_per_sec = 16;
 
     public Integer max_streaming_retries = 3;
@@ -176,7 +177,7 @@ public class Config
     public int hinted_handoff_throttle_in_kb = 1024;
     public int batchlog_replay_throttle_in_kb = 1024;
     public int max_hints_delivery_threads = 1;
-    public boolean compaction_preheat_key_cache = true;
+    public int sstable_preemptive_open_interval_in_mb = 50;
 
     public volatile boolean incremental_backups = false;
     public boolean trickle_fsync = false;
@@ -197,8 +198,6 @@ public class Config
     public String memory_allocator = NativeAllocator.class.getSimpleName();
 
     private static boolean isClientMode = false;
-
-    public boolean preheat_kernel_page_cache = false;
 
     public Integer file_cache_size_in_mb;
 
@@ -291,7 +290,8 @@ public class Config
     {
         unslabbed_heap_buffers,
         heap_buffers,
-        offheap_buffers
+        offheap_buffers,
+        offheap_objects
     }
 
     public static enum DiskFailurePolicy

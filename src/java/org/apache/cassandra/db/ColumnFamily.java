@@ -109,17 +109,6 @@ public abstract class ColumnFamily implements Iterable<Cell>, IRowCacheEntry
         return metadata;
     }
 
-    public void addIfRelevant(Cell cell, DeletionInfo.InOrderTester tester, int gcBefore)
-    {
-        // the cell itself must be not gc-able (it is live, or a still relevant tombstone), (1)
-        // and if its container is deleted, the cell must be changed more recently than the container tombstone (2)
-        if ((cell.getLocalDeletionTime() >= gcBefore) // (1)
-            && (!tester.isDeleted(cell.name(), cell.timestamp())))                                // (2)
-        {
-            addColumn(cell);
-        }
-    }
-
     public void addColumn(CellName name, ByteBuffer value, long timestamp)
     {
         addColumn(name, value, timestamp, 0);
@@ -128,23 +117,23 @@ public abstract class ColumnFamily implements Iterable<Cell>, IRowCacheEntry
     public void addColumn(CellName name, ByteBuffer value, long timestamp, int timeToLive)
     {
         assert !metadata().isCounter();
-        Cell cell = Cell.create(name, value, timestamp, timeToLive, metadata());
+        Cell cell = AbstractCell.create(name, value, timestamp, timeToLive, metadata());
         addColumn(cell);
     }
 
     public void addCounter(CellName name, long value)
     {
-        addColumn(new CounterUpdateCell(name, value, System.currentTimeMillis()));
+        addColumn(new BufferCounterUpdateCell(name, value, System.currentTimeMillis()));
     }
 
     public void addTombstone(CellName name, ByteBuffer localDeletionTime, long timestamp)
     {
-        addColumn(new DeletedCell(name, localDeletionTime, timestamp));
+        addColumn(new BufferDeletedCell(name, localDeletionTime, timestamp));
     }
 
     public void addTombstone(CellName name, int localDeletionTime, long timestamp)
     {
-        addColumn(new DeletedCell(name, localDeletionTime, timestamp));
+        addColumn(new BufferDeletedCell(name, localDeletionTime, timestamp));
     }
 
     public void addAtom(OnDiskAtom atom)
@@ -203,6 +192,12 @@ public abstract class ColumnFamily implements Iterable<Cell>, IRowCacheEntry
      * be replaced by the newly added cell.
      */
     public abstract void addColumn(Cell cell);
+
+    /**
+     * Adds a cell if it's non-gc-able and isn't shadowed by a partition/range tombstone with a higher timestamp.
+     * Requires that the cell to add is sorted strictly after the last cell in the container.
+     */
+    public abstract void maybeAppendColumn(Cell cell, DeletionInfo.InOrderTester tester, int gcBefore);
 
     /**
      * Adds all the columns of a given column map to this column map.
@@ -315,8 +310,11 @@ public abstract class ColumnFamily implements Iterable<Cell>, IRowCacheEntry
             }
         }
 
+        cfDiff.setDeletionInfo(deletionInfo().diff(cfComposite.deletionInfo()));
+
         if (!cfDiff.isEmpty())
             return cfDiff;
+        
         return null;
     }
 
@@ -324,7 +322,7 @@ public abstract class ColumnFamily implements Iterable<Cell>, IRowCacheEntry
     {
         long size = 0;
         for (Cell cell : this)
-            size += cell.dataSize();
+            size += cell.cellDataSize();
         return size;
     }
 
@@ -387,6 +385,8 @@ public abstract class ColumnFamily implements Iterable<Cell>, IRowCacheEntry
     {
         for (Cell cell : this)
             cell.updateDigest(digest);
+        if (MessagingService.instance().areAllNodesAtLeast21())
+            deletionInfo().updateDigest(digest);
     }
 
     public static ColumnFamily diff(ColumnFamily cf1, ColumnFamily cf2)
@@ -421,8 +421,8 @@ public abstract class ColumnFamily implements Iterable<Cell>, IRowCacheEntry
             int deletionTime = cell.getLocalDeletionTime();
             if (deletionTime < Integer.MAX_VALUE)
                 tombstones.update(deletionTime);
-            minColumnNamesSeen = ColumnNameHelper.minComponents(minColumnNamesSeen, cell.name, metadata.comparator);
-            maxColumnNamesSeen = ColumnNameHelper.maxComponents(maxColumnNamesSeen, cell.name, metadata.comparator);
+            minColumnNamesSeen = ColumnNameHelper.minComponents(minColumnNamesSeen, cell.name(), metadata.comparator);
+            maxColumnNamesSeen = ColumnNameHelper.maxComponents(maxColumnNamesSeen, cell.name(), metadata.comparator);
             if (cell instanceof CounterCell)
                 hasLegacyCounterShards = hasLegacyCounterShards || ((CounterCell) cell).hasLegacyShards();
         }
@@ -471,7 +471,7 @@ public abstract class ColumnFamily implements Iterable<Cell>, IRowCacheEntry
     {
         ImmutableMap.Builder<CellName, ByteBuffer> builder = ImmutableMap.builder();
         for (Cell cell : this)
-            builder.put(cell.name, cell.value);
+            builder.put(cell.name(), cell.value());
         return builder.build();
     }
 

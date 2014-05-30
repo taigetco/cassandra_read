@@ -304,7 +304,8 @@ public class CassandraDaemon
             {
                 for (final ColumnFamilyStore store : cfs.concatWithIndexes())
                 {
-                    store.enableAutoCompaction();
+                    if (store.getCompactionStrategy().shouldBeEnabled())
+                        store.enableAutoCompaction();
                 }
             }
         }

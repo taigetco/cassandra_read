@@ -33,7 +33,7 @@ from __future__ import with_statement
 from uuid import UUID
 
 description = "CQL Shell for Apache Cassandra"
-version = "5.0.0"
+version = "5.0.1"
 
 from StringIO import StringIO
 from contextlib import contextmanager, closing
@@ -135,7 +135,7 @@ if os.path.exists(OLD_HISTORY):
 
 DEFAULT_HOST = '127.0.0.1'
 DEFAULT_PORT = 9042
-DEFAULT_CQLVER = '3.1.5'
+DEFAULT_CQLVER = '3.1.7'
 
 DEFAULT_TIME_FORMAT = '%Y-%m-%d %H:%M:%S%z'
 DEFAULT_FLOAT_PRECISION = 5
@@ -168,6 +168,7 @@ parser.add_option('--debug', action='store_true',
 parser.add_option('--cqlversion', default=DEFAULT_CQLVER,
                   help='Specify a particular CQL version (default: %default).'
                        ' Examples: "3.0.3", "3.1.0"')
+parser.add_option("-e", "--execute", help='Execute the statement and quit.')
 
 CQL_ERRORS = (
     cassandra.AlreadyExists, cassandra.AuthenticationFailed, cassandra.InvalidRequest,
@@ -461,7 +462,8 @@ class Shell(cmd.Cmd):
                  tracing_enabled=False, expand_enabled=False,
                  display_time_format=DEFAULT_TIME_FORMAT,
                  display_float_precision=DEFAULT_FLOAT_PRECISION,
-                 ssl=False):
+                 ssl=False,
+                 single_statement=None):
         cmd.Cmd.__init__(self, completekey=completekey)
         self.hostname = hostname
         self.port = port
@@ -519,6 +521,9 @@ class Shell(cmd.Cmd):
         #Python driver returns BLOBs as string, but we expect them as buffer()
         cassandra.cqltypes.BytesType.deserialize = staticmethod(cassandra.cqltypes.BytesType.validate)
         cassandra.cqltypes.CassandraType.support_empty_values = True
+        self.empty_lines = 0
+        self.statement_error = False
+        self.single_statement = single_statement
 
     def set_expanded_cql_version(self, ver):
         ver, vertuple = full_cql_version(ver)
@@ -654,6 +659,7 @@ class Shell(cmd.Cmd):
     def reset_statement(self):
         self.reset_prompt()
         self.statement.truncate(0)
+        self.empty_lines = 0;
 
     def reset_prompt(self):
         if self.current_keyspace is None:
@@ -662,11 +668,16 @@ class Shell(cmd.Cmd):
             self.set_prompt(self.keyspace_prompt % self.current_keyspace)
 
     def set_continue_prompt(self):
+        if self.empty_lines >=3:
+            self.set_prompt("Statements are terminated with a ';'.  You can press CTRL-C to cancel an imcomplete statement.")
+            self.empty_lines = 0
+            return
         if self.current_keyspace is None:
             self.set_prompt(self.continue_prompt)
         else:
             spaces = ' ' * len(str(self.current_keyspace))
             self.set_prompt(self.keyspace_continue_prompt % spaces)
+        self.empty_lines += 1
 
     @contextmanager
     def prepare_loop(self):
@@ -721,7 +732,11 @@ class Shell(cmd.Cmd):
         with self.prepare_loop():
             while not self.stop:
                 try:
-                    line = self.get_input_line(self.prompt)
+                    if self.single_statement:
+                        line = self.single_statement
+                        self.stop = True
+                    else:
+                        line = self.get_input_line(self.prompt)
                     self.statement.write(line)
                     if self.onecmd(self.statement.getvalue()):
                         self.reset_statement()
@@ -985,11 +1000,12 @@ class Shell(cmd.Cmd):
         out.write(ksdef.as_cql_query())
         out.write("\n\n")
 
-        uts = self.get_usertypes_meta().get_usertypes_names(ksname)
+        uts = self.get_usertypes_meta().get_usertypes_names(ksdef.name)
         if uts:
-            out.write("USE %s;\n\n" % ksname)
+            out.write("USE %s;\n" % ksname)
             for ut in uts:
-                self.print_recreate_usertype(ksname, ut, out)
+                out.write('\n')
+                self.print_recreate_usertype(ksdef.name, ut, out)
 
         cfs = self.get_columnfamily_names(ksdef.name)
         if cfs:
@@ -1680,6 +1696,7 @@ class Shell(cmd.Cmd):
         self.query_out.flush()
 
     def printerr(self, text, color=RED, newline=True, shownum=None):
+        self.statement_error = True
         if shownum is None:
             shownum = self.show_line_nums
         if shownum:
@@ -1741,6 +1758,7 @@ def read_options(cmdlineargs, environment):
 
     optvalues.tty = sys.stdin.isatty()
     optvalues.cqlversion = option_with_default(configs.get, 'cql', 'version', DEFAULT_CQLVER)
+    optvalues.execute = None
 
     (options, arguments) = parser.parse_args(cmdlineargs, values=optvalues)
 
@@ -1755,8 +1773,11 @@ def read_options(cmdlineargs, environment):
     if len(arguments) > 1:
         port = arguments[1]
 
-    if options.file is not None:
+    if options.file or options.execute:
         options.tty = False
+
+    if options.execute and not options.execute.endswith(';'):
+        options.execute += ';'
 
     if optvalues.color in (True, False):
         options.color = optvalues.color
@@ -1838,7 +1859,8 @@ def main(options, hostname, port):
                       keyspace=options.keyspace,
                       display_time_format=options.time_format,
                       display_float_precision=options.float_precision,
-                      ssl=options.ssl)
+                      ssl=options.ssl,
+                      single_statement=options.execute)
     except KeyboardInterrupt:
         sys.exit('Connection aborted.')
     except CQL_ERRORS, e:
@@ -1850,6 +1872,9 @@ def main(options, hostname, port):
 
     shell.cmdloop()
     save_history()
+    batch_mode = options.file or options.execute
+    if batch_mode and shell.statement_error:
+        sys.exit(2)
 
 if __name__ == '__main__':
     main(*read_options(sys.argv[1:], os.environ))

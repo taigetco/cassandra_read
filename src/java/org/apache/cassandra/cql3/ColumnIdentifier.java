@@ -31,7 +31,7 @@ import org.apache.cassandra.utils.memory.AbstractAllocator;
  * Represents an identifer for a CQL column definition.
  * TODO : should support light-weight mode without text representation for when not interned
  */
-public class ColumnIdentifier implements Selectable, Comparable<ColumnIdentifier>, IMeasurableMemory
+public class ColumnIdentifier implements Selectable, IMeasurableMemory
 {
     public final ByteBuffer bytes;
     private final String text;
@@ -44,13 +44,13 @@ public class ColumnIdentifier implements Selectable, Comparable<ColumnIdentifier
         this.bytes = ByteBufferUtil.bytes(this.text);
     }
 
-    public ColumnIdentifier(ByteBuffer bytes, AbstractType type)
+    public ColumnIdentifier(ByteBuffer bytes, AbstractType<?> type)
     {
         this.bytes = bytes;
         this.text = type.getString(bytes);
     }
 
-    private ColumnIdentifier(ByteBuffer bytes, String text)
+    public ColumnIdentifier(ByteBuffer bytes, String text)
     {
         this.bytes = bytes;
         this.text = text;
@@ -94,14 +94,6 @@ public class ColumnIdentifier implements Selectable, Comparable<ColumnIdentifier
         return EMPTY_SIZE
              + ObjectSizes.sizeOnHeapExcludingData(bytes)
              + ObjectSizes.sizeOf(text);
-    }
-
-    public int compareTo(ColumnIdentifier other)
-    {
-        if (this == other)
-            return 0;
-
-        return bytes.compareTo(other.bytes);
     }
 
     public ColumnIdentifier clone(AbstractAllocator allocator)

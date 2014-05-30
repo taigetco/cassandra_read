@@ -28,6 +28,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -69,12 +70,13 @@ import com.google.common.collect.Sets;
 @RunWith(OrderedJUnit4ClassRunner.class)
 public class CompactionsTest extends SchemaLoader
 {
+    private static final String STANDARD1 = "Standard1";
     public static final String KEYSPACE1 = "Keyspace1";
 
     public ColumnFamilyStore testSingleSSTableCompaction(String strategyClassName) throws Exception
     {
         Keyspace keyspace = Keyspace.open(KEYSPACE1);
-        ColumnFamilyStore store = keyspace.getColumnFamilyStore("Standard1");
+        ColumnFamilyStore store = keyspace.getColumnFamilyStore(STANDARD1);
         store.clearUnsafe();
         store.metadata.gcGraceSeconds(1);
         store.setCompactionStrategyClass(strategyClassName);
@@ -82,18 +84,8 @@ public class CompactionsTest extends SchemaLoader
         // disable compaction while flushing
         store.disableAutoCompaction();
 
-        long timestamp = System.currentTimeMillis();
-        for (int i = 0; i < 10; i++)
-        {
-            DecoratedKey key = Util.dk(Integer.toString(i));
-            Mutation rm = new Mutation(KEYSPACE1, key.key);
-            for (int j = 0; j < 10; j++)
-                rm.add("Standard1", Util.cellname(Integer.toString(j)),
-                       ByteBufferUtil.EMPTY_BYTE_BUFFER,
-                       timestamp,
-                       j > 0 ? 3 : 0); // let first column never expire, since deleting all columns does not produce sstable
-            rm.apply();
-        }
+        long timestamp = populate(KEYSPACE1, STANDARD1, 0, 9, 3); //ttl=3s
+
         store.forceBlockingFlush();
         assertEquals(1, store.getSSTables().size());
         long originalSize = store.getSSTables().iterator().next().uncompressedLength();
@@ -116,6 +108,22 @@ public class CompactionsTest extends SchemaLoader
         assertMaxTimestamp(store, timestamp);
 
         return store;
+    }
+
+    private long populate(String ks, String cf, int startRowKey, int endRowKey, int ttl) {
+        long timestamp = System.currentTimeMillis();
+        for (int i = startRowKey; i <= endRowKey; i++)
+        {
+            DecoratedKey key = Util.dk(Integer.toString(i));
+            Mutation rm = new Mutation(ks, key.getKey());
+            for (int j = 0; j < 10; j++)
+                rm.add(cf,  Util.cellname(Integer.toString(j)),
+                       ByteBufferUtil.EMPTY_BYTE_BUFFER,
+                       timestamp,
+                       j > 0 ? ttl : 0); // let first column never expire, since deleting all columns does not produce sstable
+            rm.apply();
+        }
+        return timestamp;
     }
 
     /**
@@ -147,7 +155,7 @@ public class CompactionsTest extends SchemaLoader
         ByteBuffer scName = ByteBufferUtil.bytes("TestSuperColumn");
 
         // a subcolumn
-        Mutation rm = new Mutation(KEYSPACE1, key.key);
+        Mutation rm = new Mutation(KEYSPACE1, key.getKey());
         rm.add("Super1", Util.cellname(scName, ByteBufferUtil.bytes(0)),
                ByteBufferUtil.EMPTY_BYTE_BUFFER,
                FBUtilities.timestampMicros());
@@ -155,7 +163,7 @@ public class CompactionsTest extends SchemaLoader
         cfs.forceBlockingFlush();
 
         // shadow the subcolumn with a supercolumn tombstone
-        rm = new Mutation(KEYSPACE1, key.key);
+        rm = new Mutation(KEYSPACE1, key.getKey());
         rm.deleteRange("Super1", SuperColumns.startOf(scName), SuperColumns.endOf(scName), FBUtilities.timestampMicros());
         rm.apply();
         cfs.forceBlockingFlush();
@@ -171,6 +179,76 @@ public class CompactionsTest extends SchemaLoader
         assertEquals(key, iter.getKey());
         assertTrue(iter.next() instanceof RangeTombstone);
         assertFalse(iter.hasNext());
+    }
+
+    @Test
+    public void testUncheckedTombstoneSizeTieredCompaction() throws Exception
+    {
+        Keyspace keyspace = Keyspace.open(KEYSPACE1);
+        ColumnFamilyStore store = keyspace.getColumnFamilyStore(STANDARD1);
+        store.clearUnsafe();
+        store.metadata.gcGraceSeconds(1);
+        store.metadata.compactionStrategyOptions.put("tombstone_compaction_interval", "1");
+        store.metadata.compactionStrategyOptions.put("unchecked_tombstone_compaction", "false");
+        store.reload();
+        store.setCompactionStrategyClass(SizeTieredCompactionStrategy.class.getName());
+
+        // disable compaction while flushing
+        store.disableAutoCompaction();
+
+        //Populate sstable1 with with keys [0..9]
+        populate(KEYSPACE1, STANDARD1, 0, 9, 3); //ttl=3s
+        store.forceBlockingFlush();
+
+        //Populate sstable2 with with keys [10..19] (keys do not overlap with SSTable1)
+        long timestamp2 = populate(KEYSPACE1, STANDARD1, 10, 19, 3); //ttl=3s
+        store.forceBlockingFlush();
+
+        assertEquals(2, store.getSSTables().size());
+
+        Iterator<SSTableReader> it = store.getSSTables().iterator();
+        long originalSize1 = it.next().uncompressedLength();
+        long originalSize2 = it.next().uncompressedLength();
+
+        // wait enough to force single compaction
+        TimeUnit.SECONDS.sleep(5);
+
+        // enable compaction, submit background and wait for it to complete
+        store.enableAutoCompaction();
+        FBUtilities.waitOnFutures(CompactionManager.instance.submitBackground(store));
+        while (CompactionManager.instance.getPendingTasks() > 0 || CompactionManager.instance.getActiveCompactions() > 0)
+            TimeUnit.SECONDS.sleep(1);
+
+        // even though both sstables were candidate for tombstone compaction
+        // it was not executed because they have an overlapping token range
+        assertEquals(2, store.getSSTables().size());
+        it = store.getSSTables().iterator();
+        long newSize1 = it.next().uncompressedLength();
+        long newSize2 = it.next().uncompressedLength();
+        assertEquals("candidate sstable should not be tombstone-compacted because its key range overlap with other sstable",
+                      originalSize1, newSize1);
+        assertEquals("candidate sstable should not be tombstone-compacted because its key range overlap with other sstable",
+                      originalSize2, newSize2);
+
+        // now let's enable the magic property
+        store.metadata.compactionStrategyOptions.put("unchecked_tombstone_compaction", "true");
+        store.reload();
+
+        //submit background task again and wait for it to complete
+        FBUtilities.waitOnFutures(CompactionManager.instance.submitBackground(store));
+        while (CompactionManager.instance.getPendingTasks() > 0 || CompactionManager.instance.getActiveCompactions() > 0)
+            TimeUnit.SECONDS.sleep(1);
+
+        //we still have 2 sstables, since they were not compacted against each other
+        assertEquals(2, store.getSSTables().size());
+        it = store.getSSTables().iterator();
+        newSize1 = it.next().uncompressedLength();
+        newSize2 = it.next().uncompressedLength();
+        assertTrue("should be less than " + originalSize1 + ", but was " + newSize1, newSize1 < originalSize1);
+        assertTrue("should be less than " + originalSize2 + ", but was " + newSize2, newSize2 < originalSize2);
+
+        // make sure max timestamp of compacted sstables is recorded properly after compaction.
+        assertMaxTimestamp(store, timestamp2);
     }
 
     public static void assertMaxTimestamp(ColumnFamilyStore cfs, long maxTimestampExpected)
@@ -197,7 +275,7 @@ public class CompactionsTest extends SchemaLoader
         for (int i=1; i < 5; i++)
         {
             DecoratedKey key = Util.dk(String.valueOf(i));
-            Mutation rm = new Mutation(KEYSPACE1, key.key);
+            Mutation rm = new Mutation(KEYSPACE1, key.getKey());
             rm.add("Standard2", Util.cellname(String.valueOf(i)), ByteBufferUtil.EMPTY_BYTE_BUFFER, i);
             rm.apply();
 
@@ -212,7 +290,7 @@ public class CompactionsTest extends SchemaLoader
         for (int i=1; i < 5; i++)
         {
             DecoratedKey key = Util.dk(String.valueOf(i));
-            Mutation rm = new Mutation(KEYSPACE1, key.key);
+            Mutation rm = new Mutation(KEYSPACE1, key.getKey());
             rm.add("Standard2", Util.cellname(String.valueOf(i)), ByteBufferUtil.EMPTY_BYTE_BUFFER, i);
             rm.apply();
         }
@@ -257,7 +335,7 @@ public class CompactionsTest extends SchemaLoader
         final int ROWS_PER_SSTABLE = 10;
         for (int i = 0; i < ROWS_PER_SSTABLE; i++) {
             DecoratedKey key = Util.dk(String.valueOf(i));
-            Mutation rm = new Mutation(KEYSPACE1, key.key);
+            Mutation rm = new Mutation(KEYSPACE1, key.getKey());
             rm.add(cfname, Util.cellname("col"),
                    ByteBufferUtil.EMPTY_BYTE_BUFFER,
                    System.currentTimeMillis());
@@ -325,7 +403,7 @@ public class CompactionsTest extends SchemaLoader
 
         // Add test row
         DecoratedKey key = Util.dk(k);
-        Mutation rm = new Mutation(KEYSPACE1, key.key);
+        Mutation rm = new Mutation(KEYSPACE1, key.getKey());
         rm.add(cfname, Util.cellname(ByteBufferUtil.bytes("sc"), ByteBufferUtil.bytes("c")), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
         rm.apply();
 
@@ -337,7 +415,7 @@ public class CompactionsTest extends SchemaLoader
         assertTrue(cfs.getColumnFamily(filter).hasColumns());
 
         // Remove key
-        rm = new Mutation(KEYSPACE1, key.key);
+        rm = new Mutation(KEYSPACE1, key.getKey());
         rm.delete(cfname, 2);
         rm.apply();
 
@@ -379,7 +457,7 @@ public class CompactionsTest extends SchemaLoader
     {
         long timestamp = System.currentTimeMillis();
         DecoratedKey decoratedKey = Util.dk(String.format("%03d", key));
-        Mutation rm = new Mutation(KEYSPACE1, decoratedKey.key);
+        Mutation rm = new Mutation(KEYSPACE1, decoratedKey.getKey());
         rm.add("Standard1", Util.cellname("col"), ByteBufferUtil.EMPTY_BYTE_BUFFER, timestamp, 1000);
         rm.apply();
     }

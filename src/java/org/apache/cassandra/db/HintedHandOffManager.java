@@ -264,7 +264,7 @@ public class HintedHandOffManager implements HintedHandOffManagerMBean
     {
         // done if no hints found or the start column (same as last column processed in previous iteration) is the only one
         return hintColumnFamily == null
-               || (hintColumnFamily.getSortedColumns().size() == 1 && hintColumnFamily.getColumn((CellName)startColumn) != null);
+               || (!startColumn.isEmpty() && hintColumnFamily.getSortedColumns().size() == 1 && hintColumnFamily.getColumn((CellName)startColumn) != null);
     }
 
     private int waitForSchemaAgreement(InetAddress endpoint) throws TimeoutException
@@ -402,7 +402,7 @@ public class HintedHandOffManager implements HintedHandOffManagerMBean
                 // in which the local deletion timestamp was generated on the last column in the old page, in which
                 // case the hint will have no columns (since it's deleted) but will still be included in the resultset
                 // since (even with gcgs=0) it's still a "relevant" tombstone.
-                if (!hint.isLive(System.currentTimeMillis()))
+                if (!hint.isLive())
                     continue;
 
                 startColumn = hint.name();
@@ -450,8 +450,8 @@ public class HintedHandOffManager implements HintedHandOffManagerMBean
                         deleteHint(hostIdBytes, hint.name(), hint.timestamp());
                     }
                 };
-                WriteResponseHandler responseHandler = new WriteResponseHandler(endpoint, WriteType.UNLOGGED_BATCH, callback);
-                MessagingService.instance().sendRR(message, endpoint, responseHandler);
+                WriteResponseHandler responseHandler = new WriteResponseHandler(endpoint, WriteType.SIMPLE, callback);
+                MessagingService.instance().sendRR(message, endpoint, responseHandler, false);
                 responseHandlers.add(responseHandler);
             }
 
@@ -514,7 +514,7 @@ public class HintedHandOffManager implements HintedHandOffManagerMBean
         List<Row> rows = hintStore.getRangeSlice(range, null, filter, Integer.MAX_VALUE, System.currentTimeMillis());
         for (Row row : rows)
         {
-            UUID hostId = UUIDGen.getUUID(row.key.key);
+            UUID hostId = UUIDGen.getUUID(row.key.getKey());
             InetAddress target = StorageService.instance.getTokenMetadata().getEndpointForHostId(hostId);
             // token may have since been removed (in which case we have just read back a tombstone)
             if (target != null)
@@ -573,7 +573,7 @@ public class HintedHandOffManager implements HintedHandOffManagerMBean
         for (Row row : getHintsSlice(1))
         {
             if (row.cf != null) //ignore removed rows
-                result.addFirst(tokenFactory.toString(row.key.token));
+                result.addFirst(tokenFactory.toString(row.key.getToken()));
         }
         return result;
     }

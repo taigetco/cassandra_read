@@ -34,7 +34,7 @@ import org.apache.cassandra.exceptions.InvalidRequestException;
 public class UpdateParameters
 {
     public final CFMetaData metadata;
-    public final List<ByteBuffer> variables;
+    public final QueryOptions options;
     public final long timestamp;
     private final int ttl;
     public final int localDeletionTime;
@@ -42,10 +42,10 @@ public class UpdateParameters
     // For lists operation that require a read-before-write. Will be null otherwise.
     private final Map<ByteBuffer, CQL3Row> prefetchedLists;
 
-    public UpdateParameters(CFMetaData metadata, List<ByteBuffer> variables, long timestamp, int ttl, Map<ByteBuffer, CQL3Row> prefetchedLists)
+    public UpdateParameters(CFMetaData metadata, QueryOptions options, long timestamp, int ttl, Map<ByteBuffer, CQL3Row> prefetchedLists)
     {
         this.metadata = metadata;
-        this.variables = variables;
+        this.options = options;
         this.timestamp = timestamp;
         this.ttl = ttl;
         this.localDeletionTime = (int)(System.currentTimeMillis() / 1000);
@@ -55,13 +55,13 @@ public class UpdateParameters
     public Cell makeColumn(CellName name, ByteBuffer value) throws InvalidRequestException
     {
         QueryProcessor.validateCellName(name, metadata.comparator);
-        return Cell.create(name, value, timestamp, ttl, metadata);
+        return AbstractCell.create(name, value, timestamp, ttl, metadata);
     }
 
     public Cell makeTombstone(CellName name) throws InvalidRequestException
     {
         QueryProcessor.validateCellName(name, metadata.comparator);
-        return new DeletedCell(name, localDeletionTime, timestamp);
+        return new BufferDeletedCell(name, localDeletionTime, timestamp);
     }
 
     public RangeTombstone makeRangeTombstone(ColumnSlice slice) throws InvalidRequestException

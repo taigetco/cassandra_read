@@ -84,6 +84,8 @@ public final class MessagingService implements MessagingServiceMBean
      */
     public static final int PROTOCOL_MAGIC = 0xCA552DFA;
 
+    private boolean allNodesAtLeast21 = true;
+
     /* All verb handler identifiers */
     public enum Verb
     {
@@ -510,11 +512,11 @@ public final class MessagingService implements MessagingServiceMBean
             cp = new OutboundTcpConnectionPool(to);
             OutboundTcpConnectionPool existingPool = connectionManagers.putIfAbsent(to, cp);
             if (existingPool != null)
-            {
-                cp.close();
                 cp = existingPool;
-            }
+            else
+                cp.start();
         }
+        cp.waitForStarted();
         return cp;
     }
     
@@ -558,11 +560,23 @@ public final class MessagingService implements MessagingServiceMBean
         return messageId;
     }
 
-    public int addCallback(IAsyncCallback cb, MessageOut<? extends IMutation> message, InetAddress to, long timeout, ConsistencyLevel consistencyLevel)
+    public int addCallback(IAsyncCallback cb,
+                           MessageOut<? extends IMutation> message,
+                           InetAddress to,
+                           long timeout,
+                           ConsistencyLevel consistencyLevel,
+                           boolean allowHints)
     {
         assert message.verb == Verb.MUTATION || message.verb == Verb.COUNTER_MUTATION;
         int messageId = nextId();
-        CallbackInfo previous = callbacks.put(messageId, new WriteCallbackInfo(to, cb, message, callbackDeserializers.get(message.verb), consistencyLevel), timeout);
+        CallbackInfo previous = callbacks.put(messageId,
+                                              new WriteCallbackInfo(to,
+                                                                    cb,
+                                                                    message,
+                                                                    callbackDeserializers.get(message.verb),
+                                                                    consistencyLevel,
+                                                                    allowHints),
+                                                                    timeout);
         assert previous == null : String.format("Callback already exists for id %d! (%s)", messageId, previous);
         return messageId;
     }
@@ -587,13 +601,10 @@ public final class MessagingService implements MessagingServiceMBean
     /**
      * Send a non-mutation message to a given endpoint. This method specifies a callback
      * which is invoked with the actual response.
-     * Also holds the message (only mutation messages) to determine if it
-     * needs to trigger a hint (uses StorageProxy for that).
      *
      * @param message message to be sent.
      * @param to      endpoint to which the message needs to be sent
      * @param cb      callback interface which is used to pass the responses or
-     *                suggest that a timeout occurred to the invoker of the send().
      *                suggest that a timeout occurred to the invoker of the send().
      * @param timeout the timeout used for expiration
      * @return an reference to message id used to match with the result
@@ -615,12 +626,14 @@ public final class MessagingService implements MessagingServiceMBean
      * @param to      endpoint to which the message needs to be sent
      * @param handler callback interface which is used to pass the responses or
      *                suggest that a timeout occurred to the invoker of the send().
-     *                suggest that a timeout occurred to the invoker of the send().
      * @return an reference to message id used to match with the result
      */
-    public int sendRR(MessageOut<? extends IMutation> message, InetAddress to, AbstractWriteResponseHandler handler)
+    public int sendRR(MessageOut<? extends IMutation> message,
+                      InetAddress to,
+                      AbstractWriteResponseHandler handler,
+                      boolean allowHints)
     {
-        int id = addCallback(handler, message, to, message.getTimeout(), handler.consistencyLevel);
+        int id = addCallback(handler, message, to, message.getTimeout(), handler.consistencyLevel, allowHints);
         sendOneWay(message, id, to);
         return id;
     }
@@ -760,20 +773,47 @@ public final class MessagingService implements MessagingServiceMBean
         return packed >>> (start + 1) - count & ~(-1 << count);
     }
 
+    public boolean areAllNodesAtLeast21()
+    {
+        return allNodesAtLeast21;
+    }
+
     /**
      * @return the last version associated with address, or @param version if this is the first such version
      */
     public int setVersion(InetAddress endpoint, int version)
     {
         logger.debug("Setting version {} for {}", version, endpoint);
+        if (version < VERSION_21)
+            allNodesAtLeast21 = false;
         Integer v = versions.put(endpoint, version);
+
+        // if the version was increased to 2.0 or later, see if all nodes are >= 2.0 now
+        if (v != null && v < VERSION_21 && version >= VERSION_21)
+            refreshAllNodesAtLeast21();
+
         return v == null ? version : v;
     }
 
     public void resetVersion(InetAddress endpoint)
     {
         logger.debug("Reseting version for {}", endpoint);
-        versions.remove(endpoint);
+        Integer removed = versions.remove(endpoint);
+        if (removed != null && removed <= VERSION_21)
+            refreshAllNodesAtLeast21();
+    }
+
+    private void refreshAllNodesAtLeast21()
+    {
+        for (Integer version: versions.values())
+        {
+            if (version < VERSION_21)
+            {
+                allNodesAtLeast21 = false;
+                return;
+            }
+        }
+        allNodesAtLeast21 = true;
     }
 
     public int getVersion(InetAddress endpoint)
@@ -806,6 +846,7 @@ public final class MessagingService implements MessagingServiceMBean
     {
         return versions.containsKey(endpoint);
     }
+
 
     public void incrementDroppedMessages(Verb verb)
     {

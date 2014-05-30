@@ -23,6 +23,7 @@ import java.nio.ByteBuffer;
 import java.util.*;
 
 import com.google.common.collect.AbstractIterator;
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.cql3.CQL3Row;
 import org.apache.cassandra.cql3.ColumnIdentifier;
@@ -49,8 +50,9 @@ public abstract class AbstractCellNameType extends AbstractCType implements Cell
     private final IVersionedSerializer<NamesQueryFilter> namesQueryFilterSerializer;
     private final IVersionedSerializer<IDiskAtomFilter> diskAtomFilterSerializer;
 
-    protected AbstractCellNameType()
+    protected AbstractCellNameType(boolean isByteOrderComparable)
     {
+        super(isByteOrderComparable);
         columnComparator = new Comparator<Cell>()
         {
             public int compare(Cell c1, Cell c2)
@@ -269,7 +271,7 @@ public abstract class AbstractCellNameType extends AbstractCType implements Cell
             while (cells.hasNext())
             {
                 final Cell cell = cells.next();
-                if (cell.isMarkedForDelete(now))
+                if (!cell.isLive(now))
                     continue;
 
                 return new CQL3Row()
@@ -294,19 +296,20 @@ public abstract class AbstractCellNameType extends AbstractCType implements Cell
         }
     }
 
-    protected static CQL3Row.Builder makeSparseCQL3RowBuilder(final CellNameType type, final long now)
+    protected static CQL3Row.Builder makeSparseCQL3RowBuilder(final CFMetaData cfMetaData, final CellNameType type, final long now)
     {
         return new CQL3Row.Builder()
         {
             public CQL3Row.RowIterator group(Iterator<Cell> cells)
             {
-                return new SparseRowIterator(type, cells, now);
+                return new SparseRowIterator(cfMetaData, type, cells, now);
             }
         };
     }
 
     private static class SparseRowIterator extends AbstractIterator<CQL3Row> implements CQL3Row.RowIterator
     {
+        private final CFMetaData cfMetaData;
         private final CellNameType type;
         private final Iterator<Cell> cells;
         private final long now;
@@ -316,8 +319,9 @@ public abstract class AbstractCellNameType extends AbstractCType implements Cell
         private CellName previous;
         private CQL3RowOfSparse currentRow;
 
-        public SparseRowIterator(CellNameType type, Iterator<Cell> cells, long now)
+        public SparseRowIterator(CFMetaData cfMetaData, CellNameType type, Iterator<Cell> cells, long now)
         {
+            this.cfMetaData = cfMetaData;
             this.type = type;
             this.cells = cells;
             this.now = now;
@@ -339,7 +343,7 @@ public abstract class AbstractCellNameType extends AbstractCType implements Cell
             while (cells.hasNext())
             {
                 Cell cell = cells.next();
-                if (cell.isMarkedForDelete(now))
+                if (!cell.isLive(now))
                     continue;
 
                 nextCell = cell;
@@ -357,7 +361,7 @@ public abstract class AbstractCellNameType extends AbstractCType implements Cell
                 if (currentRow == null || !current.isSameCQL3RowAs(type, previous))
                 {
                     toReturn = currentRow;
-                    currentRow = new CQL3RowOfSparse(current);
+                    currentRow = new CQL3RowOfSparse(cfMetaData, current);
                 }
                 currentRow.add(nextCell);
                 nextCell = null;
@@ -378,12 +382,14 @@ public abstract class AbstractCellNameType extends AbstractCType implements Cell
 
     private static class CQL3RowOfSparse implements CQL3Row
     {
+        private final CFMetaData cfMetaData;
         private final CellName cell;
         private Map<ColumnIdentifier, Cell> columns;
         private Map<ColumnIdentifier, List<Cell>> collections;
 
-        CQL3RowOfSparse(CellName cell)
+        CQL3RowOfSparse(CFMetaData metadata, CellName cell)
         {
+            this.cfMetaData = metadata;
             this.cell = cell;
         }
 
@@ -395,7 +401,7 @@ public abstract class AbstractCellNameType extends AbstractCType implements Cell
         void add(Cell cell)
         {
             CellName cellName = cell.name();
-            ColumnIdentifier columnName =  cellName.cql3ColumnName();
+            ColumnIdentifier columnName =  cellName.cql3ColumnName(cfMetaData);
             if (cellName.isCollectionCell())
             {
                 if (collections == null)

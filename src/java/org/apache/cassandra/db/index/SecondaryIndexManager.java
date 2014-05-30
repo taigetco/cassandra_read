@@ -496,7 +496,7 @@ public class SecondaryIndexManager
             }
             else
             {
-                ((PerColumnSecondaryIndex) index).delete(key.key, cell, opGroup);
+                ((PerColumnSecondaryIndex) index).delete(key.getKey(), cell, opGroup);
             }
         }
     }
@@ -656,7 +656,7 @@ public class SecondaryIndexManager
 
         public void remove(Cell cell)
         {
-            if (cell.isMarkedForDelete(System.currentTimeMillis()))
+            if (!cell.isLive())
                 return;
 
             for (SecondaryIndex index : indexFor(cell.name()))
@@ -665,7 +665,7 @@ public class SecondaryIndexManager
                 {
                     try (OpOrder.Group opGroup = baseCfs.keyspace.writeOrder.start())
                     {
-                        ((PerColumnSecondaryIndex) index).delete(key.key, cell, opGroup);
+                        ((PerColumnSecondaryIndex) index).delete(key.getKey(), cell, opGroup);
                     }
                 }
             }
@@ -674,7 +674,7 @@ public class SecondaryIndexManager
         public void updateRowLevelIndexes()
         {
             for (SecondaryIndex index : rowLevelIndexMap.values())
-                ((PerRowSecondaryIndex) index).index(key.key, null);
+                ((PerRowSecondaryIndex) index).index(key.getKey(), null);
         }
     }
 
@@ -693,12 +693,12 @@ public class SecondaryIndexManager
 
         public void insert(Cell cell)
         {
-            if (cell.isMarkedForDelete(System.currentTimeMillis()))
+            if (!cell.isLive())
                 return;
 
             for (SecondaryIndex index : indexFor(cell.name()))
                 if (index instanceof PerColumnSecondaryIndex)
-                    ((PerColumnSecondaryIndex) index).insert(key.key, cell, opGroup);
+                    ((PerColumnSecondaryIndex) index).insert(key.getKey(), cell, opGroup);
         }
 
         public void update(Cell oldCell, Cell cell)
@@ -710,28 +710,28 @@ public class SecondaryIndexManager
             {
                 if (index instanceof PerColumnSecondaryIndex)
                 {
-                    if (!cell.isMarkedForDelete(System.currentTimeMillis()))
-                        ((PerColumnSecondaryIndex) index).update(key.key, oldCell, cell, opGroup);
+                    if (cell.isLive())
+                        ((PerColumnSecondaryIndex) index).update(key.getKey(), oldCell, cell, opGroup);
                     else
-                        ((PerColumnSecondaryIndex) index).delete(key.key, oldCell, opGroup);
+                        ((PerColumnSecondaryIndex) index).delete(key.getKey(), oldCell, opGroup);
                 }
             }
         }
 
         public void remove(Cell cell)
         {
-            if (cell.isMarkedForDelete(System.currentTimeMillis()))
+            if (!cell.isLive())
                 return;
 
             for (SecondaryIndex index : indexFor(cell.name()))
                 if (index instanceof PerColumnSecondaryIndex)
-                   ((PerColumnSecondaryIndex) index).delete(key.key, cell, opGroup);
+                   ((PerColumnSecondaryIndex) index).delete(key.getKey(), cell, opGroup);
         }
 
         public void updateRowLevelIndexes()
         {
             for (SecondaryIndex index : rowLevelIndexMap.values())
-                ((PerRowSecondaryIndex) index).index(key.key, cf);
+                ((PerRowSecondaryIndex) index).index(key.getKey(), cf);
         }
     }
 }

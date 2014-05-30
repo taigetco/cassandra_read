@@ -102,8 +102,9 @@ commitlog_directory: /var/lib/cassandra/commitlog
 
 # location to write flushing sstables to.  Ideally, this will also be
 # a separate spindle in HDD deployments.  If you only have two spindles,
-# have it share with the data spindle.
-flush_directory: /var/lib/cassandra/flush
+# have it share with the data spindle.  By default, this will point at the data
+# directory.
+# flush_directory: /var/lib/cassandra/flush
 
 # policy for data disk failures:
 # stop_paranoid: shut down gossip and Thrift even for single-sstable errors.
@@ -282,17 +283,18 @@ memtable_cleanup_threshold: 0.4
 # Options are:
 #   heap_buffers:    on heap nio buffers
 #   offheap_buffers: off heap (direct) nio buffers
+#   offheap_objects: native memory, eliminating nio buffer heap overhead
 memtable_allocation_type: heap_buffers
 
 # Total space to use for commitlogs.  Since commitlog segments are
 # mmapped, and hence use up address space, the default size is 32
-# on 32-bit JVMs, and 1024 on 64-bit JVMs.
+# on 32-bit JVMs, and 8192 on 64-bit JVMs.
 #
 # If space gets above this value (it will round up to the next nearest
 # segment multiple), Cassandra will flush every dirty CF in the oldest
 # segment and remove it.  So a small total commitlog space will tend
 # to cause more flush activity on less-active columnfamilies.
-# commitlog_total_space_in_mb: 4096
+# commitlog_total_space_in_mb: 8192
 
 # This sets the amount of memtable flush writer threads.  These will
 # be blocked by disk io, and each one will hold a memtable in memory
@@ -479,6 +481,11 @@ tombstone_failure_threshold: 100000
 # that wastefully either.
 column_index_size_in_kb: 64
 
+
+# Log WARN on any batch size exceeding this value. 5kb per batch by default.
+# Caution should be taken on increasing the size of this threshold as it can lead to node instability.
+batch_size_warn_threshold_in_kb: 5
+
 # Size limit for rows being compacted in memory.  Larger rows will spill
 # over to disk and use a slower two-pass compaction process.  A message
 # will be logged specifying the row key.
@@ -493,8 +500,8 @@ in_memory_compaction_limit_in_mb: 64
 # slowly or too fast, you should look at
 # compaction_throughput_mb_per_sec first.
 #
-# concurrent_compactors defaults to the number of cores.
-# Uncomment to make compaction mono-threaded, the pre-0.8 default.
+# concurrent_compactors defaults to the smaller of (number of disks,
+# number of cores), with a minimum of 2 and a maximum of 8.
 #concurrent_compactors: 1
 
 # Throttles compaction to the given total throughput across the entire
@@ -505,10 +512,11 @@ in_memory_compaction_limit_in_mb: 64
 # of compaction, including validation compaction.
 compaction_throughput_mb_per_sec: 16
 
-# Track cached row keys during compaction, and re-cache their new
-# positions in the compacted sstable.  Disable if you use really large
-# key caches.
-compaction_preheat_key_cache: true
+# When compacting, the replacement sstable(s) can be opened before they
+# are completely written, and used in place of the prior sstables for
+# any range that has been written. This helps to smoothly transfer reads 
+# between the sstables, reducing page cache churn and keeping hot rows hot
+sstable_preemptive_open_interval_in_mb: 50
 
 # Throttles all outbound streaming file transfers on this node to the
 # given total throughput in Mbps. This is necessary because Cassandra does
@@ -724,9 +732,3 @@ internode_compression: all
 # reducing overhead from the TCP protocol itself, at the cost of increasing
 # latency if you block for cross-datacenter responses.
 inter_dc_tcp_nodelay: false
-
-# Enable or disable kernel page cache preheating from contents of the key cache after compaction.
-# When enabled it would preheat only first "page" (4KB) of each row to optimize
-# for sequential access. Note: This could be harmful for fat rows, see CASSANDRA-4937
-# for further details on that topic.
-preheat_kernel_page_cache: false

@@ -196,9 +196,9 @@ public class BTree
      * @param <V>
      * @return
      */
-    public static <V> Cursor<V> slice(Object[] btree, boolean forwards)
+    public static <V> Cursor<V, V> slice(Object[] btree, boolean forwards)
     {
-        Cursor<V> r = new Cursor<>();
+        Cursor<V, V> r = new Cursor<>();
         r.reset(btree, forwards);
         return r;
     }
@@ -214,9 +214,9 @@ public class BTree
      * @param <V>
      * @return
      */
-    public static <V> Cursor<V> slice(Object[] btree, Comparator<V> comparator, V start, V end, boolean forwards)
+    public static <K, V extends K> Cursor<K, V> slice(Object[] btree, Comparator<K> comparator, K start, K end, boolean forwards)
     {
-        Cursor<V> r = new Cursor<>();
+        Cursor<K, V> r = new Cursor<>();
         r.reset(btree, comparator, start, end, forwards);
         return r;
     }
@@ -232,9 +232,9 @@ public class BTree
      * @param <V>
      * @return
      */
-    public static <V> Cursor<V> slice(Object[] btree, Comparator<V> comparator, V start, boolean startInclusive, V end, boolean endInclusive, boolean forwards)
+    public static <K, V extends K> Cursor<K, V> slice(Object[] btree, Comparator<K> comparator, K start, boolean startInclusive, K end, boolean endInclusive, boolean forwards)
     {
-        Cursor<V> r = new Cursor<>();
+        Cursor<K, V> r = new Cursor<>();
         r.reset(btree, comparator, start, startInclusive, end, endInclusive, forwards);
         return r;
     }
@@ -268,27 +268,13 @@ public class BTree
     // wrapping generic Comparator with support for Special +/- infinity sentinels
     static <V> int find(Comparator<V> comparator, Object key, Object[] a, final int fromIndex, final int toIndex)
     {
-        // attempt to terminate quickly by checking the first element,
-        // as many uses of this class will (probably) be updating identical sets
-        if (fromIndex >= toIndex)
-            return -(fromIndex + 1);
-
-        int c = compare(comparator, key, a[fromIndex]);
-        if (c <= 0)
-        {
-            if (c == 0)
-                return fromIndex;
-            else
-                return -(fromIndex + 1);
-        }
-
-        int low = fromIndex + 1;
+        int low = fromIndex;
         int high = toIndex - 1;
 
         while (low <= high)
         {
             int mid = (low + high) / 2;
-            int cmp = compare(comparator, key, a[mid]);
+            int cmp = comparator.compare((V) key, (V) a[mid]);
 
             if (cmp > 0)
                 low = mid + 1;
@@ -350,7 +336,7 @@ public class BTree
     }
 
     // Special class for making certain operations easier, so we can define a +/- Inf
-    private static interface Special extends Comparable<Object> { }
+    static interface Special extends Comparable<Object> { }
     static final Special POSITIVE_INFINITY = new Special()
     {
         public int compareTo(Object o)
@@ -395,11 +381,6 @@ public class BTree
         if (b instanceof Special)
             return -((Special) b).compareTo(a);
         return cmp.compare((V) a, (V) b);
-    }
-
-    public static boolean isWellFormed(Object[] btree)
-    {
-        return isWellFormed(null, btree, true, NEGATIVE_INFINITY, POSITIVE_INFINITY);
     }
 
     public static boolean isWellFormed(Object[] btree, Comparator<? extends Object> cmp)

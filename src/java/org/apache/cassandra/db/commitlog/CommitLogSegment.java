@@ -43,6 +43,7 @@ import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.ColumnFamily;
 import org.apache.cassandra.db.Mutation;
+import org.apache.cassandra.io.FSReadError;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.util.FileUtils;
 import org.apache.cassandra.utils.CLibrary;
@@ -66,14 +67,24 @@ public class CommitLogSegment
 {
     private static final Logger logger = LoggerFactory.getLogger(CommitLogSegment.class);
 
-    private final static long idBase = System.currentTimeMillis();
+    private final static long idBase;
     private final static AtomicInteger nextId = new AtomicInteger(1);
+    static
+    {
+        long maxId = Long.MIN_VALUE;
+        for (File file : new File(DatabaseDescriptor.getCommitLogLocation()).listFiles())
+        {
+            if (CommitLogDescriptor.isValid(file.getName()))
+                maxId = Math.max(CommitLogDescriptor.fromFileName(file.getName()).id, maxId);
+        }
+        idBase = Math.max(System.currentTimeMillis(), maxId + 1);
+    }
 
-    // The commit log entry overhead in bytes (int: length + long: head checksum + long: tail checksum)
-    static final int ENTRY_OVERHEAD_SIZE = 4 + 8 + 8;
+    // The commit log entry overhead in bytes (int: length + int: head checksum + int: tail checksum)
+    public static final int ENTRY_OVERHEAD_SIZE = 4 + 4 + 4;
 
-    // The commit log (chained) sync marker/header size in bytes (int: length + long: checksum [segmentId, position])
-    static final int SYNC_MARKER_SIZE = 4 + 8;
+    // The commit log (chained) sync marker/header size in bytes (int: length + int: checksum [segmentId, position])
+    static final int SYNC_MARKER_SIZE = 4 + 4;
 
     // The OpOrder used to order appends wrt sync
     private final OpOrder appendOrder = new OpOrder();
@@ -162,10 +173,13 @@ public class CommitLogSegment
             fd = CLibrary.getfd(logFileAccessor.getFD());
 
             buffer = logFileAccessor.getChannel().map(FileChannel.MapMode.READ_WRITE, 0, DatabaseDescriptor.getCommitLogSegmentSize());
-            // mark the initial header as uninitialised
-            buffer.putInt(0, 0);
-            buffer.putLong(4, 0);
-            allocatePosition.set(SYNC_MARKER_SIZE);
+            // write the header
+            CommitLogDescriptor.writeHeader(buffer, descriptor);
+            // mark the initial sync marker as uninitialised
+            buffer.putInt(CommitLogDescriptor.HEADER_SIZE, 0);
+            buffer.putLong(CommitLogDescriptor.HEADER_SIZE + 4, 0);
+            allocatePosition.set(CommitLogDescriptor.HEADER_SIZE + SYNC_MARKER_SIZE);
+            lastSyncedOffset = CommitLogDescriptor.HEADER_SIZE;
         }
         catch (IOException e)
         {
@@ -300,17 +314,17 @@ public class CommitLogSegment
             // we don't chain the crcs here to ensure this method is idempotent if it fails
             int offset = lastSyncedOffset;
             final PureJavaCrc32 crc = new PureJavaCrc32();
-            crc.update((int) (id & 0xFFFFFFFFL));
-            crc.update((int) (id >>> 32));
-            crc.update(offset);
+            crc.updateInt((int) (id & 0xFFFFFFFFL));
+            crc.updateInt((int) (id >>> 32));
+            crc.updateInt(offset);
             buffer.putInt(offset, nextMarker);
-            buffer.putLong(offset + 4, crc.getValue());
+            buffer.putInt(offset + 4, crc.getCrc());
 
             // zero out the next sync marker so replayer can cleanly exit
             if (nextMarker < buffer.capacity())
             {
                 buffer.putInt(nextMarker, 0);
-                buffer.putLong(nextMarker + 4, 0);
+                buffer.putInt(nextMarker + 4, 0);
             }
 
             // actually perform the sync and signal those waiting for it
@@ -389,6 +403,23 @@ public class CommitLogSegment
     public String getName()
     {
         return logFile.getName();
+    }
+
+    void waitForFinalSync()
+    {
+        while (true)
+        {
+            WaitQueue.Signal signal = syncComplete.register();
+            if (lastSyncedOffset < buffer.capacity())
+            {
+                signal.awaitUninterruptibly();
+            }
+            else
+            {
+                signal.cancel();
+                break;
+            }
+        }
     }
 
     /**
@@ -477,7 +508,7 @@ public class CommitLogSegment
             UUID cfId = clean.getKey();
             AtomicInteger cleanPos = clean.getValue();
             AtomicInteger dirtyPos = cfDirty.get(cfId);
-            if (dirtyPos != null && dirtyPos.intValue() < cleanPos.intValue())
+            if (dirtyPos != null && dirtyPos.intValue() <= cleanPos.intValue())
             {
                 cfDirty.remove(cfId);
                 iter.remove();
@@ -490,9 +521,9 @@ public class CommitLogSegment
      */
     public synchronized Collection<UUID> getDirtyCFIDs()
     {
-        removeCleanFromDirty();
         if (cfClean.isEmpty() || cfDirty.isEmpty())
             return cfDirty.keySet();
+
         List<UUID> r = new ArrayList<>(cfDirty.size());
         for (Map.Entry<UUID, AtomicInteger> dirty : cfDirty.entrySet())
         {

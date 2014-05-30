@@ -30,12 +30,16 @@ import java.util.Map;
 import java.util.UUID;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import io.netty.util.AttributeKey;
 import io.netty.util.CharsetUtil;
 
 import org.apache.cassandra.db.ConsistencyLevel;
 import org.apache.cassandra.db.TypeSizes;
+import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.Pair;
 import org.apache.cassandra.utils.UUIDGen;
 
 /**
@@ -47,6 +51,9 @@ import org.apache.cassandra.utils.UUIDGen;
  */
 public abstract class CBUtil
 {
+    public static final ByteBufAllocator allocator = new PooledByteBufAllocator(true);
+    public static final ByteBufAllocator onHeapAllocator = new PooledByteBufAllocator(false);
+
     private CBUtil() {}
 
     private static String readString(ByteBuf cb, int length)
@@ -299,7 +306,8 @@ public abstract class CBUtil
         if (slice.nioBufferCount() > 0)
             return slice.nioBuffer();
         else
-            return Unpooled.copiedBuffer(slice).nioBuffer();
+            return ByteBuffer.wrap(readRawBytes(cb));
+
     }
 
     public static void writeValue(byte[] bytes, ByteBuf cb)
@@ -322,8 +330,11 @@ public abstract class CBUtil
             return;
         }
 
-        cb.writeInt(bytes.remaining());
-        cb.writeBytes(bytes.duplicate());
+        int remaining = bytes.remaining();
+        cb.writeInt(remaining);
+
+        if (remaining > 0)
+            cb.writeBytes(bytes.duplicate());
     }
 
     public static int sizeOfValue(byte[] bytes)
@@ -361,6 +372,22 @@ public abstract class CBUtil
         for (ByteBuffer value : values)
             size += CBUtil.sizeOfValue(value);
         return size;
+    }
+
+    public static Pair<List<String>, List<ByteBuffer>> readNameAndValueList(ByteBuf cb)
+    {
+        int size = cb.readUnsignedShort();
+        if (size == 0)
+            return Pair.create(Collections.<String>emptyList(), Collections.<ByteBuffer>emptyList());
+
+        List<String> s = new ArrayList<>(size);
+        List<ByteBuffer> l = new ArrayList<>(size);
+        for (int i = 0; i < size; i++)
+        {
+            s.add(readString(cb));
+            l.add(readValue(cb));
+        }
+        return Pair.create(s, l);
     }
 
     public static InetSocketAddress readInet(ByteBuf cb)

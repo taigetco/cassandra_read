@@ -111,6 +111,7 @@ import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.FilterFactory;
 import org.apache.cassandra.utils.IFilter;
 import org.apache.cassandra.utils.Pair;
+import org.apache.cassandra.utils.concurrent.OpOrder;
 
 import static org.apache.cassandra.db.Directories.SECONDARY_INDEX_NAME_SEPARATOR;
 
@@ -158,6 +159,7 @@ public class SSTableReader extends SSTable
      * The age is in milliseconds since epoc and is local to this host.
      */
     public final long maxDataAge;
+    public final boolean isOpenEarly;
 
     // indexfile and datafile: might be null before a call to load()
     private SegmentedFile ifile;
@@ -192,6 +194,7 @@ public class SSTableReader extends SSTable
     private SSTableReader replacedBy;
     private SSTableReader replaces;
     private SSTableDeletingTask deletingTask;
+    private Runnable runOnClose;
 
     @VisibleForTesting
     public RestorableMeter readMeter;
@@ -334,12 +337,13 @@ public class SSTableReader extends SSTable
                                                   metadata,
                                                   partitioner,
                                                   System.currentTimeMillis(),
-                                                  statsMetadata);
+                                                  statsMetadata,
+                                                  false);
 
         // special implementation of load to use non-pooled SegmentedFile builders
         SegmentedFile.Builder ibuilder = new BufferedSegmentedFile.Builder();
         SegmentedFile.Builder dbuilder = sstable.compression
-                                       ? new CompressedSegmentedFile.Builder()
+                                       ? new CompressedSegmentedFile.Builder(null)
                                        : new BufferedSegmentedFile.Builder();
         if (!sstable.loadSummary(ibuilder, dbuilder))
             sstable.buildSummary(false, ibuilder, dbuilder, false, Downsampling.BASE_SAMPLING_LEVEL);
@@ -382,7 +386,8 @@ public class SSTableReader extends SSTable
                                                   metadata,
                                                   partitioner,
                                                   System.currentTimeMillis(),
-                                                  statsMetadata);
+                                                  statsMetadata,
+                                                  false);
 
         // load index and filter
         long start = System.nanoTime();
@@ -461,7 +466,8 @@ public class SSTableReader extends SSTable
                                       IndexSummary isummary,
                                       IFilter bf,
                                       long maxDataAge,
-                                      StatsMetadata sstableMetadata)
+                                      StatsMetadata sstableMetadata,
+                                      boolean isOpenEarly)
     {
         assert desc != null && partitioner != null && ifile != null && dfile != null && isummary != null && bf != null && sstableMetadata != null;
         return new SSTableReader(desc,
@@ -472,7 +478,8 @@ public class SSTableReader extends SSTable
                                  isummary,
                                  bf,
                                  maxDataAge,
-                                 sstableMetadata);
+                                 sstableMetadata,
+                                 isOpenEarly);
     }
 
 
@@ -481,11 +488,13 @@ public class SSTableReader extends SSTable
                           CFMetaData metadata,
                           IPartitioner partitioner,
                           long maxDataAge,
-                          StatsMetadata sstableMetadata)
+                          StatsMetadata sstableMetadata,
+                          boolean isOpenEarly)
     {
         super(desc, components, metadata, partitioner);
         this.sstableMetadata = sstableMetadata;
         this.maxDataAge = maxDataAge;
+        this.isOpenEarly = isOpenEarly;
 
         deletingTask = new SSTableDeletingTask(this);
 
@@ -522,9 +531,10 @@ public class SSTableReader extends SSTable
                           IndexSummary indexSummary,
                           IFilter bloomFilter,
                           long maxDataAge,
-                          StatsMetadata sstableMetadata)
+                          StatsMetadata sstableMetadata,
+                          boolean isOpenEarly)
     {
-        this(desc, components, metadata, partitioner, maxDataAge, sstableMetadata);
+        this(desc, components, metadata, partitioner, maxDataAge, sstableMetadata, isOpenEarly);
 
         this.ifile = ifile;
         this.dfile = dfile;
@@ -554,13 +564,15 @@ public class SSTableReader extends SSTable
 
         synchronized (replaceLock)
         {
-            boolean closeBf = true, closeSummary = true, closeFiles = true;
+            boolean closeBf = true, closeSummary = true, closeFiles = true, deleteFiles = false;
 
             if (replacedBy != null)
             {
                 closeBf = replacedBy.bf != bf;
                 closeSummary = replacedBy.indexSummary != indexSummary;
                 closeFiles = replacedBy.dfile != dfile;
+                // if the replacement sstablereader uses a different path, clean up our paths
+                deleteFiles = !dfile.path.equals(replacedBy.dfile.path);
             }
 
             if (replaces != null)
@@ -568,6 +580,7 @@ public class SSTableReader extends SSTable
                 closeBf &= replaces.bf != bf;
                 closeSummary &= replaces.indexSummary != indexSummary;
                 closeFiles &= replaces.dfile != dfile;
+                deleteFiles &= !dfile.path.equals(replaces.dfile.path);
             }
 
             boolean deleteAll = false;
@@ -593,32 +606,71 @@ public class SSTableReader extends SSTable
                     replacedBy.replaces = replaces;
             }
 
-            if (references.get() != 0)
-            {
-                throw new IllegalStateException("SSTable is not fully released (" + references.get() + " references)");
-            }
-            if (closeBf)
-                bf.close();
-            if (closeSummary)
-                indexSummary.close();
-            if (closeFiles)
-            {
-                ifile.cleanup();
-                dfile.cleanup();
-            }
-            if (deleteAll)
-            {
-                /**
-                 * Do the OS a favour and suggest (using fadvice call) that we
-                 * don't want to see pages of this SSTable in memory anymore.
-                 *
-                 * NOTE: We can't use madvice in java because it requires the address of
-                 * the mapping, so instead we always open a file and run fadvice(fd, 0, 0) on it
-                 */
-                dropPageCache();
-                deletingTask.schedule();
-            }
+            scheduleTidy(closeBf, closeSummary, closeFiles, deleteFiles, deleteAll);
         }
+    }
+
+    private void scheduleTidy(final boolean closeBf, final boolean closeSummary, final boolean closeFiles, final boolean deleteFiles, final boolean deleteAll)
+    {
+        if (references.get() != 0)
+            throw new IllegalStateException("SSTable is not fully released (" + references.get() + " references)");
+
+        final ColumnFamilyStore cfs = Schema.instance.getColumnFamilyStoreInstance(metadata.cfId);
+        final OpOrder.Barrier barrier;
+        if (cfs != null)
+        {
+            barrier = cfs.readOrdering.newBarrier();
+            barrier.issue();
+        }
+        else
+            barrier = null;
+
+        StorageService.tasks.execute(new Runnable()
+        {
+            public void run()
+            {
+                if (barrier != null)
+                    barrier.await();
+                if (closeBf)
+                    bf.close();
+                if (closeSummary)
+                    indexSummary.close();
+                if (closeFiles)
+                {
+                    ifile.cleanup();
+                    dfile.cleanup();
+                }
+                if (runOnClose != null)
+                    runOnClose.run();
+                if (deleteAll)
+                {
+                    /**
+                     * Do the OS a favour and suggest (using fadvice call) that we
+                     * don't want to see pages of this SSTable in memory anymore.
+                     *
+                     * NOTE: We can't use madvice in java because it requires the address of
+                     * the mapping, so instead we always open a file and run fadvice(fd, 0, 0) on it
+                     */
+                    dropPageCache();
+                    deletingTask.run();
+                }
+                else if (deleteFiles)
+                {
+                    FileUtils.deleteWithConfirm(new File(dfile.path));
+                    FileUtils.deleteWithConfirm(new File(ifile.path));
+                }
+            }
+        });
+    }
+
+    public boolean equals(Object that)
+    {
+        return that instanceof SSTableReader && ((SSTableReader) that).descriptor.equals(this.descriptor);
+    }
+
+    public int hashCode()
+    {
+        return this.descriptor.hashCode();
     }
 
     public String getFilename()
@@ -747,7 +799,7 @@ public class SSTableReader extends SSTable
                 last = decoratedKey;
 
                 if (recreateBloomFilter)
-                    bf.add(decoratedKey.key);
+                    bf.add(decoratedKey.getKey());
 
                 // if summary was already read from disk we don't want to re-populate it using primary index
                 if (!summaryLoaded)
@@ -835,8 +887,8 @@ public class SSTableReader extends SSTable
         {
             oStream = new DataOutputStreamAndChannel(new FileOutputStream(summariesFile));
             IndexSummary.serializer.serialize(summary, oStream, descriptor.version.hasSamplingLevel);
-            ByteBufferUtil.writeWithLength(first.key, oStream);
-            ByteBufferUtil.writeWithLength(last.key, oStream);
+            ByteBufferUtil.writeWithLength(first.getKey(), oStream);
+            ByteBufferUtil.writeWithLength(last.getKey(), oStream);
             ibuilder.serializeBounds(oStream);
             dbuilder.serializeBounds(oStream);
         }
@@ -862,6 +914,53 @@ public class SSTableReader extends SSTable
             replacedBy = replacement;
             replacement.replaces = this;
             replacement.replaceLock = replaceLock;
+        }
+    }
+
+    public SSTableReader cloneWithNewStart(DecoratedKey newStart, final Runnable runOnClose)
+    {
+        synchronized (replaceLock)
+        {
+            assert replacedBy == null;
+
+            if (newStart.compareTo(this.first) > 0)
+            {
+                if (newStart.compareTo(this.last) > 0)
+                {
+                    this.runOnClose = new Runnable()
+                    {
+                        public void run()
+                        {
+                            CLibrary.trySkipCache(dfile.path, 0, 0);
+                            CLibrary.trySkipCache(ifile.path, 0, 0);
+                            runOnClose.run();
+                        }
+                    };
+                }
+                else
+                {
+                    final long dataStart = getPosition(newStart, Operator.GE).position;
+                    final long indexStart = getIndexScanPosition(newStart);
+                    this.runOnClose = new Runnable()
+                    {
+                        public void run()
+                        {
+                            CLibrary.trySkipCache(dfile.path, 0, dataStart);
+                            CLibrary.trySkipCache(ifile.path, 0, indexStart);
+                            runOnClose.run();
+                        }
+                    };
+                }
+            }
+
+            if (readMeterSyncFuture != null)
+                readMeterSyncFuture.cancel(false);
+            SSTableReader replacement = new SSTableReader(descriptor, components, metadata, partitioner, ifile, dfile, indexSummary.readOnlyClone(), bf, maxDataAge, sstableMetadata, isOpenEarly);
+            replacement.readMeter = this.readMeter;
+            replacement.first = this.last.compareTo(newStart) > 0 ? newStart : this.last;
+            replacement.last = this.last;
+            setReplacedBy(replacement);
+            return replacement;
         }
     }
 
@@ -919,7 +1018,7 @@ public class SSTableReader extends SSTable
             if (readMeterSyncFuture != null)
                 readMeterSyncFuture.cancel(false);
 
-            SSTableReader replacement = new SSTableReader(descriptor, components, metadata, partitioner, ifile, dfile, newSummary, bf, maxDataAge, sstableMetadata);
+            SSTableReader replacement = new SSTableReader(descriptor, components, metadata, partitioner, ifile, dfile, newSummary, bf, maxDataAge, sstableMetadata, isOpenEarly);
             replacement.readMeter = this.readMeter;
             replacement.first = this.first;
             replacement.last = this.last;
@@ -993,7 +1092,7 @@ public class SSTableReader extends SSTable
         return getIndexScanPositionFromBinarySearchResult(indexSummary.binarySearch(key), indexSummary);
     }
 
-    public static long getIndexScanPositionFromBinarySearchResult(int binarySearchResult, IndexSummary referencedIndexSummary)
+    private static long getIndexScanPositionFromBinarySearchResult(int binarySearchResult, IndexSummary referencedIndexSummary)
     {
         if (binarySearchResult == -1)
             return -1;
@@ -1216,6 +1315,12 @@ public class SSTableReader extends SSTable
         return positions;
     }
 
+    public void invalidateCacheKey(DecoratedKey key)
+    {
+        KeyCacheKey cacheKey = new KeyCacheKey(metadata.cfId, descriptor, key.getKey());
+        keyCache.remove(cacheKey);
+    }
+
     public void cacheKey(DecoratedKey key, RowIndexEntry info)
     {
         CachingOptions caching = metadata.getCaching();
@@ -1227,37 +1332,14 @@ public class SSTableReader extends SSTable
             return;
         }
 
-        KeyCacheKey cacheKey = new KeyCacheKey(metadata.cfId, descriptor, key.key);
+        KeyCacheKey cacheKey = new KeyCacheKey(metadata.cfId, descriptor, key.getKey());
         logger.trace("Adding cache entry for {} -> {}", cacheKey, info);
         keyCache.put(cacheKey, info);
     }
 
-    public void preheat(Map<DecoratedKey, RowIndexEntry> cachedKeys) throws IOException
-    {
-        RandomAccessFile f = new RandomAccessFile(getFilename(), "r");
-
-        try
-        {
-            int fd = CLibrary.getfd(f.getFD());
-
-            for (Map.Entry<DecoratedKey, RowIndexEntry> entry : cachedKeys.entrySet())
-            {
-                cacheKey(entry.getKey(), entry.getValue());
-
-                // add to the cache but don't do actual preheating if we have it disabled in the config
-                if (DatabaseDescriptor.shouldPreheatPageCache() && fd > 0)
-                    CLibrary.preheatPage(fd, entry.getValue().position);
-            }
-        }
-        finally
-        {
-            FileUtils.closeQuietly(f);
-        }
-    }
-
     public RowIndexEntry getCachedPosition(DecoratedKey key, boolean updateStats)
     {
-        return getCachedPosition(new KeyCacheKey(metadata.cfId, descriptor, key.key), updateStats);
+        return getCachedPosition(new KeyCacheKey(metadata.cfId, descriptor, key.getKey()), updateStats);
     }
 
     private RowIndexEntry getCachedPosition(KeyCacheKey unifiedKey, boolean updateStats)
@@ -1301,7 +1383,7 @@ public class SSTableReader extends SSTable
         if (op == Operator.EQ)
         {
             assert key instanceof DecoratedKey; // EQ only make sense if the key is a valid row key
-            if (!bf.isPresent(((DecoratedKey)key).key))
+            if (!bf.isPresent(((DecoratedKey)key).getKey()))
             {
                 Tracing.trace("Bloom filter allows skipping sstable {}", descriptor.generation);
                 return null;
@@ -1312,7 +1394,7 @@ public class SSTableReader extends SSTable
         if ((op == Operator.EQ || op == Operator.GE) && (key instanceof DecoratedKey))
         {
             DecoratedKey decoratedKey = (DecoratedKey)key;
-            KeyCacheKey cacheKey = new KeyCacheKey(metadata.cfId, descriptor, decoratedKey.key);
+            KeyCacheKey cacheKey = new KeyCacheKey(metadata.cfId, descriptor, decoratedKey.getKey());
             RowIndexEntry cachedPosition = getCachedPosition(cacheKey, updateCacheAndStats);
             if (cachedPosition != null)
             {
@@ -1368,7 +1450,7 @@ public class SSTableReader extends SSTable
                     // Compare raw keys if possible for performance, otherwise compare decorated keys.
                     if (op == Operator.EQ)
                     {
-                        opSatisfied = exactMatch = indexKey.equals(((DecoratedKey) key).key);
+                        opSatisfied = exactMatch = indexKey.equals(((DecoratedKey) key).getKey());
                     }
                     else
                     {
@@ -1631,6 +1713,20 @@ public class SSTableReader extends SSTable
     public boolean isRepaired()
     {
         return sstableMetadata.repairedAt != ActiveRepairService.UNREPAIRED_SSTABLE;
+    }
+
+    public SSTableReader getCurrentReplacement()
+    {
+        synchronized (replaceLock)
+        {
+            SSTableReader cur = this, next = replacedBy;
+            while (next != null)
+            {
+                cur = next;
+                next = next.replacedBy;
+            }
+            return cur;
+        }
     }
 
     /**

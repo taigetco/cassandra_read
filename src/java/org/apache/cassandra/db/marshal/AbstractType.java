@@ -77,8 +77,7 @@ public abstract class AbstractType<T> implements Comparator<ByteBuffer>
         TypeSerializer<T> serializer = getSerializer();
         serializer.validate(bytes);
 
-        T value = serializer.deserialize(bytes);
-        return value == null ? "null" : serializer.toString(value);
+        return serializer.toString(serializer.deserialize(bytes));
     }
 
     /** get a byte representation of the given string. */
@@ -153,6 +152,15 @@ public abstract class AbstractType<T> implements Comparator<ByteBuffer>
     public boolean isValueCompatibleWith(AbstractType<?> previous)
     {
         return isCompatibleWith(previous);
+    }
+
+    /**
+     * @return true IFF the byte representation of this type can be compared unsigned
+     * and always return the same result as calling this object's compare or compareCollectionMembers methods
+     */
+    public boolean isByteOrderComparable()
+    {
+        return false;
     }
 
     /**

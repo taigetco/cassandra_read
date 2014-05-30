@@ -30,6 +30,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.db.BufferDecoratedKey;
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.RowIndexEntry;
 import org.apache.cassandra.dht.IPartitioner;
@@ -55,8 +56,6 @@ import org.apache.cassandra.utils.Pair;
 public abstract class SSTable
 {
     static final Logger logger = LoggerFactory.getLogger(SSTable.class);
-
-    public static final String TEMPFILE_MARKER = "tmp";
 
     public static final int TOMBSTONE_HISTOGRAM_BIN_SIZE = 100;
 
@@ -124,8 +123,8 @@ public abstract class SSTable
      */
     public static DecoratedKey getMinimalKey(DecoratedKey key)
     {
-        return key.key.position() > 0 || key.key.hasRemaining() || !key.key.hasArray()
-                                       ? new DecoratedKey(key.token, HeapAllocator.instance.clone(key.key))
+        return key.getKey().position() > 0 || key.getKey().hasRemaining() || !key.getKey().hasArray()
+                                       ? new BufferDecoratedKey(key.getToken(), HeapAllocator.instance.clone(key.getKey()))
                                        : key;
     }
 

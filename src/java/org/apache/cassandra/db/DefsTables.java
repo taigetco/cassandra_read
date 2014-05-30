@@ -248,7 +248,7 @@ public class DefsTables
             if (newState.hasColumns())
                 updateKeyspace(KSMetaData.fromSchema(new Row(key, newState), Collections.<CFMetaData>emptyList(), new UTMetaData()));
             else
-                keyspacesToDrop.add(AsciiType.instance.getString(key.key));
+                keyspacesToDrop.add(AsciiType.instance.getString(key.getKey()));
         }
 
         return keyspacesToDrop;
@@ -297,7 +297,7 @@ public class DefsTables
             }
             else // has modifications in the nested ColumnFamilies, need to perform nested diff to determine what was really changed
             {
-                String ksName = AsciiType.instance.getString(keyspace.key);
+                String ksName = AsciiType.instance.getString(keyspace.getKey());
 
                 Map<String, CFMetaData> oldCfDefs = new HashMap<String, CFMetaData>();
                 for (CFMetaData cfm : Schema.instance.getKSMetaData(ksName).cfMetaData().values())
@@ -362,7 +362,7 @@ public class DefsTables
                     dropType(type);
 
                 for (MapDifference.ValueDifference<UserType> tdiff : typesDiff.entriesDiffering().values())
-                    addType(tdiff.rightValue()); // use the most recent value
+                    updateType(tdiff.rightValue()); // use the most recent value
             }
         }
     }
@@ -412,7 +412,7 @@ public class DefsTables
         ksm.userTypes.addType(ut);
 
         if (!StorageService.instance.isClientMode())
-            MigrationManager.instance.notifyUpdateKeyspace(ksm);
+            MigrationManager.instance.notifyCreateUserType(ut);
     }
 
     private static void updateKeyspace(KSMetaData newState)
@@ -444,6 +444,19 @@ public class DefsTables
         }
     }
 
+    private static void updateType(UserType ut)
+    {
+        KSMetaData ksm = Schema.instance.getKSMetaData(ut.keyspace);
+        assert ksm != null;
+
+        logger.info("Updating {}", ut);
+
+        ksm.userTypes.addType(ut);
+
+        if (!StorageService.instance.isClientMode())
+            MigrationManager.instance.notifyUpdateUserType(ut);
+    }
+
     private static void dropKeyspace(String ksName)
     {
         KSMetaData ksm = Schema.instance.getKSMetaData(ksName);
@@ -464,6 +477,7 @@ public class DefsTables
                     cfs.snapshot(snapshotName);
                 Keyspace.open(ksm.name).dropCf(cfm.cfId);
             }
+            CommitLog.instance.discardColumnFamily(cfm.cfId);
         }
 
         // remove the keyspace from the static instances.
@@ -494,6 +508,7 @@ public class DefsTables
 
         CompactionManager.instance.interruptCompactionFor(Arrays.asList(cfm), true);
 
+        CommitLog.instance.discardColumnFamily(cfm.cfId);
         CommitLog.instance.forceRecycleAllSegments();
 
         if (!StorageService.instance.isClientMode())
@@ -513,7 +528,7 @@ public class DefsTables
         ksm.userTypes.removeType(ut);
 
         if (!StorageService.instance.isClientMode())
-            MigrationManager.instance.notifyUpdateKeyspace(ksm);
+            MigrationManager.instance.notifyUpdateUserType(ut);
     }
 
     private static KSMetaData makeNewKeyspaceDefinition(KSMetaData ksm, CFMetaData toExclude)

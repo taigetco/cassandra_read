@@ -83,7 +83,7 @@ public abstract class AbstractSSTableSimpleWriter
         int maxGen = 0;
         for (Descriptor desc : existing)
             maxGen = Math.max(maxGen, desc.generation);
-        return new Descriptor(directory, keyspace, columnFamily, maxGen + 1, true).filenameFor(Component.DATA);
+        return new Descriptor(directory, keyspace, columnFamily, maxGen + 1, Descriptor.Type.TEMP).filenameFor(Component.DATA);
     }
 
     /**
@@ -131,7 +131,7 @@ public abstract class AbstractSSTableSimpleWriter
      */
     public void addColumn(ByteBuffer name, ByteBuffer value, long timestamp)
     {
-        addColumn(new Cell(metadata.comparator.cellFromByteBuffer(name), value, timestamp));
+        addColumn(new BufferCell(metadata.comparator.cellFromByteBuffer(name), value, timestamp));
     }
 
     /**
@@ -146,7 +146,7 @@ public abstract class AbstractSSTableSimpleWriter
      */
     public void addExpiringColumn(ByteBuffer name, ByteBuffer value, long timestamp, int ttl, long expirationTimestampMS)
     {
-        addColumn(new ExpiringCell(metadata.comparator.cellFromByteBuffer(name), value, timestamp, ttl, (int)(expirationTimestampMS / 1000)));
+        addColumn(new BufferExpiringCell(metadata.comparator.cellFromByteBuffer(name), value, timestamp, ttl, (int)(expirationTimestampMS / 1000)));
     }
 
     /**
@@ -156,9 +156,9 @@ public abstract class AbstractSSTableSimpleWriter
      */
     public void addCounterColumn(ByteBuffer name, long value)
     {
-        addColumn(new CounterCell(metadata.comparator.cellFromByteBuffer(name),
-                                  CounterContext.instance().createGlobal(counterid, 1L, value),
-                                  System.currentTimeMillis()));
+        addColumn(new BufferCounterCell(metadata.comparator.cellFromByteBuffer(name),
+                                        CounterContext.instance().createGlobal(counterid, 1L, value),
+                                        System.currentTimeMillis()));
     }
 
     /**

@@ -56,31 +56,6 @@ public class SSTableExportTest extends SchemaLoader
         return bytesToHex(ByteBufferUtil.bytes(str));
     }
     
-    public SSTableWriter getDummyWriter() throws IOException
-    {
-        File tempSS = tempSSTableFile("Keyspace1", "Standard1");
-        ColumnFamily cfamily = ArrayBackedSortedColumns.factory.create("Keyspace1", "Standard1");
-        SSTableWriter writer = new SSTableWriter(tempSS.getPath(), 2, ActiveRepairService.UNREPAIRED_SSTABLE);
-
-        // Add rowA
-        cfamily.addColumn(Util.cellname("colA"), ByteBufferUtil.bytes("valA"), System.currentTimeMillis());
-        writer.append(Util.dk("rowA"), cfamily);
-        cfamily.clear();
-        
-        cfamily.addColumn(Util.cellname("colB"), ByteBufferUtil.bytes("valB"), System.currentTimeMillis());
-        writer.append(Util.dk("rowB"), cfamily);
-        cfamily.clear();
-        
-        
-        return writer;
-
-    }
-    
-    
-    public PrintStream dummyStream = new PrintStream(new OutputStream(){
-        public void write(int b) throws IOException { throw new IOException(); }
-    });
-
     @Test
     public void testEnumeratekeys() throws IOException
     {
@@ -126,7 +101,7 @@ public class SSTableExportTest extends SchemaLoader
         int nowInSec = (int)(System.currentTimeMillis() / 1000) + 42; //live for 42 seconds
         // Add rowA
         cfamily.addColumn(Util.cellname("colA"), ByteBufferUtil.bytes("valA"), System.currentTimeMillis());
-        cfamily.addColumn(new ExpiringCell(Util.cellname("colExp"), ByteBufferUtil.bytes("valExp"), System.currentTimeMillis(), 42, nowInSec));
+        cfamily.addColumn(new BufferExpiringCell(Util.cellname("colExp"), ByteBufferUtil.bytes("valExp"), System.currentTimeMillis(), 42, nowInSec));
         writer.append(Util.dk("rowA"), cfamily);
         cfamily.clear();
 
@@ -153,7 +128,7 @@ public class SSTableExportTest extends SchemaLoader
         assertEquals("unexpected number of keys", 2, rowA.keySet().size());
         assertEquals("unexpected row key",asHex("rowA"),rowA.get("key"));
 
-        JSONArray colsA = (JSONArray)rowA.get("columns");
+        JSONArray colsA = (JSONArray)rowA.get("cells");
         JSONArray colA = (JSONArray)colsA.get(0);
         assert hexToBytes((String)colA.get(1)).equals(ByteBufferUtil.bytes("valA"));
 
@@ -165,7 +140,7 @@ public class SSTableExportTest extends SchemaLoader
         assertEquals("unexpected number of keys", 2, rowB.keySet().size());
         assertEquals("unexpected row key",asHex("rowB"),rowB.get("key"));
 
-        JSONArray colsB = (JSONArray)rowB.get("columns");
+        JSONArray colsB = (JSONArray)rowB.get("cells");
         JSONArray colB = (JSONArray)colsB.get(0);
         assert colB.size() == 3;
 
@@ -219,7 +194,7 @@ public class SSTableExportTest extends SchemaLoader
         SSTableWriter writer = new SSTableWriter(tempSS.getPath(), 2, ActiveRepairService.UNREPAIRED_SSTABLE);
 
         // Add rowA
-        cfamily.addColumn(CounterCell.createLocal(Util.cellname("colA"), 42, System.currentTimeMillis(), Long.MIN_VALUE));
+        cfamily.addColumn(BufferCounterCell.createLocal(Util.cellname("colA"), 42, System.currentTimeMillis(), Long.MIN_VALUE));
         writer.append(Util.dk("rowA"), cfamily);
         cfamily.clear();
 
@@ -235,7 +210,7 @@ public class SSTableExportTest extends SchemaLoader
         assertEquals("unexpected number of keys", 2, row.keySet().size());
         assertEquals("unexpected row key",asHex("rowA"),row.get("key"));
 
-        JSONArray cols = (JSONArray)row.get("columns");
+        JSONArray cols = (JSONArray)row.get("cells");
         JSONArray colA = (JSONArray)cols.get(0);
         assert hexToBytes((String)colA.get(0)).equals(ByteBufferUtil.bytes("colA"));
         assert ((String) colA.get(3)).equals("c");
@@ -250,7 +225,7 @@ public class SSTableExportTest extends SchemaLoader
         SSTableWriter writer = new SSTableWriter(tempSS.getPath(), 2, ActiveRepairService.UNREPAIRED_SSTABLE);
 
         // Add rowA
-        cfamily.addColumn(new Cell(Util.cellname("data"), UTF8Type.instance.fromString("{\"foo\":\"bar\"}")));
+        cfamily.addColumn(new BufferCell(Util.cellname("data"), UTF8Type.instance.fromString("{\"foo\":\"bar\"}")));
         writer.append(Util.dk("rowA"), cfamily);
         cfamily.clear();
 
@@ -267,7 +242,7 @@ public class SSTableExportTest extends SchemaLoader
         assertEquals("unexpected number of keys", 2, row.keySet().size());
         assertEquals("unexpected row key",asHex("rowA"),row.get("key"));
 
-        JSONArray cols = (JSONArray)row.get("columns");
+        JSONArray cols = (JSONArray)row.get("cells");
         JSONArray colA = (JSONArray)cols.get(0);
         assert hexToBytes((String)colA.get(0)).equals(ByteBufferUtil.bytes("data"));
         assert colA.get(1).equals("{\"foo\":\"bar\"}");
@@ -276,7 +251,6 @@ public class SSTableExportTest extends SchemaLoader
     @Test
     public void testExportColumnsWithMetadata() throws IOException, ParseException
     {
-
         File tempSS = tempSSTableFile("Keyspace1", "Standard1");
         ColumnFamily cfamily = ArrayBackedSortedColumns.factory.create("Keyspace1", "Standard1");
         SSTableWriter writer = new SSTableWriter(tempSS.getPath(), 2, ActiveRepairService.UNREPAIRED_SSTABLE);
@@ -293,7 +267,6 @@ public class SSTableExportTest extends SchemaLoader
         SSTableExport.export(reader, new PrintStream(tempJson.getPath()), new String[0]);
 
         JSONArray json = (JSONArray)JSONValue.parseWithException(new FileReader(tempJson));
-        System.out.println(json.toJSONString());
         assertEquals("unexpected number of rows", 1, json.size());
 
         JSONObject row = (JSONObject)json.get(0);
@@ -320,7 +293,7 @@ public class SSTableExportTest extends SchemaLoader
                 serializedDeletionInfo.toJSONString());
 
         // check the colums are what we put in
-        JSONArray cols = (JSONArray) row.get("columns");
+        JSONArray cols = (JSONArray) row.get("cells");
         assertNotNull("expecing columns to be present", cols);
         assertEquals("expecting two columns", 2, cols.size());
 
@@ -331,7 +304,6 @@ public class SSTableExportTest extends SchemaLoader
         JSONArray col2 = (JSONArray) cols.get(1);
         assertEquals("column name did not match", ByteBufferUtil.bytes("colName1"), hexToBytes((String) col2.get(0)));
         assertEquals("column value did not match", ByteBufferUtil.bytes("val1"), hexToBytes((String) col2.get(1)));
-
     }
 
     /**
@@ -357,7 +329,7 @@ public class SSTableExportTest extends SchemaLoader
         assertEquals(1, json.size());
 
         JSONObject row = (JSONObject)json.get(0);
-        JSONArray cols = (JSONArray) row.get("columns");
+        JSONArray cols = (JSONArray) row.get("cells");
         assertEquals(1, cols.size());
 
         // check column name and value

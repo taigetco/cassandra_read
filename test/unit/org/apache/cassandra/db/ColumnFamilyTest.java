@@ -22,12 +22,13 @@ import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.*;
+import java.util.TreeMap;
 
 import com.google.common.collect.Iterables;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
+import org.apache.cassandra.Util;
 import org.apache.cassandra.io.sstable.ColumnStats;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.net.MessagingService;
@@ -35,7 +36,9 @@ import org.apache.cassandra.utils.ByteBufferUtil;
 
 import static org.apache.cassandra.Util.column;
 import static org.apache.cassandra.Util.cellname;
+import static org.apache.cassandra.Util.tombstone;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 
 public class ColumnFamilyTest extends SchemaLoader
 {
@@ -105,6 +108,48 @@ public class ColumnFamilyTest extends SchemaLoader
     }
 
     @Test
+    public void testDigest()
+    {
+        ColumnFamily cf = ArrayBackedSortedColumns.factory.create("Keyspace1", "Standard1");
+        ColumnFamily cf2 = ArrayBackedSortedColumns.factory.create("Keyspace1", "Standard1");
+
+        ByteBuffer digest = ColumnFamily.digest(cf);
+
+        cf.addColumn(column("col1", "", 1));
+        cf2.addColumn(column("col1", "", 1));
+
+        assert !digest.equals(ColumnFamily.digest(cf));
+
+        digest = ColumnFamily.digest(cf);
+        assert digest.equals(ColumnFamily.digest(cf2));
+
+        cf.addColumn(column("col2", "", 2));
+        assert !digest.equals(ColumnFamily.digest(cf));
+
+        digest = ColumnFamily.digest(cf);
+        cf.addColumn(column("col1", "", 3));
+        assert !digest.equals(ColumnFamily.digest(cf));
+
+        digest = ColumnFamily.digest(cf);
+        cf.delete(new DeletionTime(4, 4));
+        assert !digest.equals(ColumnFamily.digest(cf));
+
+        digest = ColumnFamily.digest(cf);
+        cf.delete(tombstone("col1", "col11", 5, 5));
+        assert !digest.equals(ColumnFamily.digest(cf));
+
+        digest = ColumnFamily.digest(cf);
+        assert digest.equals(ColumnFamily.digest(cf));
+
+        cf.delete(tombstone("col2", "col21", 5, 5));
+        assert !digest.equals(ColumnFamily.digest(cf));
+
+        digest = ColumnFamily.digest(cf);
+        cf.delete(tombstone("col1", "col11", 5, 5)); // this does not change RangeTombstoneLList
+        assert digest.equals(ColumnFamily.digest(cf));
+    }
+
+    @Test
     public void testTimestamp()
     {
         ColumnFamily cf = ArrayBackedSortedColumns.factory.create("Keyspace1", "Standard1");
@@ -140,9 +185,9 @@ public class ColumnFamilyTest extends SchemaLoader
 
         // check that tombstone wins timestamp ties
         cf_result.addTombstone(cellname("col1"), 0, 3);
-        assert cf_result.getColumn(cellname("col1")).isMarkedForDelete(System.currentTimeMillis());
+        assertFalse(cf_result.getColumn(cellname("col1")).isLive());
         cf_result.addColumn(cellname("col1"), val2, 3);
-        assert cf_result.getColumn(cellname("col1")).isMarkedForDelete(System.currentTimeMillis());
+        assertFalse(cf_result.getColumn(cellname("col1")).isLive());
 
         // check that column value wins timestamp ties in absence of tombstone
         cf_result.addColumn(cellname("col3"), val, 2);

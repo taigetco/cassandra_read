@@ -140,7 +140,9 @@ public class NodeTool
                 Drain.class,
                 TruncateHints.class,
                 TpStats.class,
-                TakeToken.class
+                TakeToken.class,
+                SetLoggingLevel.class,
+                GetLoggingLevels.class
         );
 
         Cli<Runnable> parser = Cli.<Runnable>builder("nodetool")
@@ -422,6 +424,9 @@ public class NodeTool
         @Arguments(description = "Specify a keyspace for accurate ownership information (topology awareness)")
         private String keyspace = null;
 
+        @Option(title = "resolve_ip", name = {"-r", "--resolve-ip"}, description = "Show node domain names instead of IPs")
+        private boolean resolveIp = false;
+
         @Override
         public void execute(NodeProbe probe)
         {
@@ -453,7 +458,7 @@ public class NodeTool
                 System.out.printf("Note: Ownership information does not include topology; for complete information, specify a keyspace%n");
             }
             System.out.println();
-            for (Entry<String, SetHostStat> entry : getOwnershipByDc(probe, false, tokensToEndpoints, ownerships).entrySet())
+            for (Entry<String, SetHostStat> entry : getOwnershipByDc(probe, resolveIp, tokensToEndpoints, ownerships).entrySet())
                 printDc(probe, format, entry.getKey(), endpointsToTokens, entry.getValue());
 
             if (DatabaseDescriptor.getNumTokens() > 1)
@@ -527,7 +532,7 @@ public class NodeTool
                         ? loadMap.get(endpoint)
                         : "?";
                 String owns = stat.owns != null ? new DecimalFormat("##0.00%").format(stat.owns) : "?";
-                System.out.printf(format, endpoint, rack, status, state, load, owns, stat.token);
+                System.out.printf(format, stat.ipOrDns(), rack, status, state, load, owns, stat.token);
             }
             System.out.println();
         }
@@ -1401,7 +1406,7 @@ public class NodeTool
         }
     }
 
-    @Command(name = "taketoken", description = "Move the token(s) from the existing owner(s) to this node.  For vnodes only.  Use \\\\ to escape negative tokens.")
+    @Command(name = "taketoken", description = "Move the token(s) from the existing owner(s) to this node.  For vnodes only.")
     public static class TakeToken extends NodeToolCmd
     {
         @Arguments(usage = "<token, ...>", description = "Token(s) to take", required = true)
@@ -1442,7 +1447,7 @@ public class NodeTool
     @Command(name = "move", description = "Move node on the token ring to a new token")
     public static class Move extends NodeToolCmd
     {
-        @Arguments(usage = "<new token>", description = "The new token. (for negative tokens)", required = true)
+        @Arguments(usage = "<new token>", description = "The new token.", required = true)
         private String newToken = EMPTY;
 
         @Override
@@ -1578,8 +1583,8 @@ public class NodeTool
         @Arguments(usage = "[<keyspace> <cfnames>...]", description = "The keyspace followed by one or many column families")
         private List<String> args = new ArrayList<>();
 
-        @Option(title = "parallel", name = {"-par", "--parallel"}, description = "Use -par to carry out a parallel repair")
-        private boolean parallel = false;
+        @Option(title = "seqential", name = {"-seq", "--sequential"}, description = "Use -seq to carry out a sequential repair")
+        private boolean sequential = false;
 
         @Option(title = "local_dc", name = {"-local", "--in-local-dc"}, description = "Use -local to only repair against nodes in the same datacenter")
         private boolean localDC = false;
@@ -1599,8 +1604,8 @@ public class NodeTool
         @Option(title = "primary_range", name = {"-pr", "--partitioner-range"}, description = "Use -pr to repair only the first range returned by the partitioner")
         private boolean primaryRange = false;
 
-        @Option(title = "incremental_repair", name = {"-inc", "--incremental"}, description = "Use -inc to use the new incremental repair")
-        private boolean incrementalRepair = false;
+        @Option(title = "full", name = {"-full", "--full"}, description = "Use -full to issue a full repair.")
+        private boolean fullRepair = false;
 
         @Override
         public void execute(NodeProbe probe)
@@ -1621,9 +1626,9 @@ public class NodeTool
                     else if(!specificHosts.isEmpty())
                         hosts = newArrayList(specificHosts);
                     if (!startToken.isEmpty() || !endToken.isEmpty())
-                        probe.forceRepairRangeAsync(System.out, keyspace, !parallel, dataCenters,hosts, startToken, endToken, !incrementalRepair);
+                        probe.forceRepairRangeAsync(System.out, keyspace, sequential, dataCenters,hosts, startToken, endToken, fullRepair);
                     else
-                        probe.forceRepairAsync(System.out, keyspace, !parallel, dataCenters, hosts, primaryRange, !incrementalRepair, cfnames);
+                        probe.forceRepairAsync(System.out, keyspace, sequential, dataCenters, hosts, primaryRange, fullRepair, cfnames);
                 } catch (Exception e)
                 {
                     throw new RuntimeException("Error occurred during repair", e);
@@ -1833,11 +1838,11 @@ public class NodeTool
                 System.out.printf("Note: Ownership information does not include topology; for complete information, specify a keyspace%n");
             }
 
-            // More tokens then nodes (aka vnodes)?
-            if (tokensToEndpoints.values().size() < tokensToEndpoints.keySet().size())
-                isTokenPerNode = false;
-
             Map<String, SetHostStat> dcs = getOwnershipByDc(probe, resolveIp, tokensToEndpoints, ownerships);
+
+            // More tokens than nodes (aka vnodes)?
+            if (dcs.values().size() < tokensToEndpoints.keySet().size())
+                isTokenPerNode = false;
 
             findMaxAddressLength(dcs);
 
@@ -2130,24 +2135,17 @@ public class NodeTool
         }
     }
 
-    @Command(name = "rebuild_index", description = "A full rebuilds of native secondry index for a given column family")
+    @Command(name = "rebuild_index", description = "A full rebuild of native secondary indexes for a given column family")
     public static class RebuildIndex extends NodeToolCmd
     {
-        @Arguments(usage = "<keyspace> <cfname> [<indexName...>]", description = "The keyspace and column family name followed by an optional list of index names (IndexNameExample: Standard3.IdxName Standard3.IdxName1)")
+        @Arguments(usage = "<keyspace> <cfname> <indexName...>", description = "The keyspace and column family name followed by a list of index names (IndexNameExample: Standard3.IdxName Standard3.IdxName1)")
         List<String> args = new ArrayList<>();
 
         @Override
         public void execute(NodeProbe probe)
         {
-            checkArgument(args.size() >= 2, "rebuild_index requires ks and cf args");
-
-            List<String> indexNames = new ArrayList<>();
-            if (args.size() > 2)
-            {
-                indexNames.addAll(args.subList(2, args.size()));
-            }
-
-            probe.rebuildIndex(args.get(0), args.get(1), toArray(indexNames, String.class));
+            checkArgument(args.size() >= 3, "rebuild_index requires ks, cf and idx args");
+            probe.rebuildIndex(args.get(0), args.get(1), toArray(args.subList(2, args.size()), String.class));
         }
     }
 
@@ -2292,6 +2290,34 @@ public class NodeTool
                 probe.truncateHints();
             else
                 probe.truncateHints(endpoint);
+        }
+    }
+    
+    @Command(name = "setlogginglevel", description = "Set a log level for a given logger. If both classQualifer and level are empty/null, it will reset based on the initial configuration")
+    public static class SetLoggingLevel extends NodeToolCmd
+    {
+        @Arguments(usage = "<classQualifer> <level>", description = "The logger classQualifer and the logger level (can be empty)")
+        private List<String> args = new ArrayList<>();
+
+        @Override
+        public void execute(NodeProbe probe)
+        {
+            String classQualifier = args.size() >= 1 ? args.get(0) : EMPTY;
+            String level = args.size() == 2 ? args.get(1) : EMPTY;
+            probe.setLoggingLevel(classQualifier, level);
+        }
+    }
+    
+    @Command(name = "getlogginglevels", description = "Get the runtime logging levels")
+    public static class GetLoggingLevels extends NodeToolCmd
+    {
+        @Override
+        public void execute(NodeProbe probe)
+        {
+            // what if some one set a very long logger name? 50 space may not be enough...
+            System.out.printf("%n%-50s%10s%n", "Logger Name", "Log Level");
+            for (Map.Entry<String, String> entry : probe.getLoggingLevels().entrySet())
+                System.out.printf("%-50s%10s%n", entry.getKey(), entry.getValue());
         }
     }
 
