@@ -575,7 +575,7 @@ class Shell(cmd.Cmd):
     def get_connection_versions(self):
         result, = self.session.execute("select * from system.local where key = 'local'")
         vers = {
-            'build': result.release_version,
+            'build': "2.1.0-beta2-SNAPSHOT",
             'protocol': result.native_protocol_version,
             'cql': result.cql_version,
         }
