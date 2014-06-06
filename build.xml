@@ -25,7 +25,7 @@
     <property name="debuglevel" value="source,lines,vars"/>
 
     <!-- default version and SCM information -->
-    <property name="base.version" value="2.1.0-beta2"/>
+    <property name="base.version" value="2.1.0-rc1"/>
     <property name="scm.connection" value="scm:git://git.apache.org/cassandra.git"/>
     <property name="scm.developerConnection" value="scm:git://git.apache.org/cassandra.git"/>
     <property name="scm.url" value="http://git-wip-us.apache.org/repos/asf?p=cassandra.git;a=tree"/>
@@ -61,6 +61,7 @@
     <property name="test.long.src" value="${test.dir}/long"/>
     <property name="test.pig.src" value="${test.dir}/pig"/>
     <property name="dist.dir" value="${build.dir}/dist"/>
+
 	
 	<property name="source.version" value="1.7"/>
 	<property name="target.version" value="1.7"/>
@@ -91,6 +92,9 @@
 
     <property name="test.timeout" value="60000" />
     <property name="test.long.timeout" value="600000" />
+
+    <!-- default for cql tests. Can be override by -Dcassandra.test.use_prepared=false -->
+    <property name="cassandra.test.use_prepared" value="true" />
 
     <!-- http://cobertura.sourceforge.net/ -->
     <property name="cobertura.version" value="2.0.3"/>
@@ -361,7 +365,7 @@
           	<exclusion groupId="org.mortbay.jetty" artifactId="servlet-api"/>
           </dependency>
           <dependency groupId="org.apache.hadoop" artifactId="hadoop-minicluster" version="1.0.3"/>
-          <dependency groupId="org.apache.pig" artifactId="pig" version="0.11.1"/>
+          <dependency groupId="org.apache.pig" artifactId="pig" version="0.12.1"/>
           <dependency groupId="net.java.dev.jna" artifactId="jna" version="4.0.0"/>
 
           <dependency groupId="net.sourceforge.cobertura" artifactId="cobertura" version="${cobertura.version}">
@@ -374,7 +378,7 @@
           <dependency groupId="com.addthis.metrics" artifactId="reporter-config" version="2.1.0" />
           <dependency groupId="org.mindrot" artifactId="jbcrypt" version="0.3m" />
           <dependency groupId="io.airlift" artifactId="airline" version="0.6" />
-          <dependency groupId="io.netty" artifactId="netty-all" version="4.0.17.Final" />
+          <dependency groupId="io.netty" artifactId="netty-all" version="4.0.19.Final" />
           <dependency groupId="com.google.code.findbugs" artifactId="jsr305" version="2.0.2" />
           <dependency groupId="com.clearspring.analytics" artifactId="stream" version="2.5.2" />
           <dependency groupId="com.datastax.cassandra" artifactId="cassandra-driver-core" version="2.0.1" />
@@ -427,8 +431,6 @@
                 artifactId="cassandra-parent"
                 version="${version}"/>
         <dependency groupId="joda-time" artifactId="joda-time" version="2.3" />
-        <dependency groupId="org.slf4j" artifactId="slf4j-log4j12" version="1.7.2"/>
-        <dependency groupId="log4j" artifactId="log4j" version="1.2.16" />
       </artifact:pom>
 
       <!-- now the pom's for artifacts being deployed to Maven Central -->
@@ -1061,6 +1063,8 @@
         <jvmarg value="-javaagent:${basedir}/lib/jamm-0.2.6.jar" />
         <jvmarg value="-ea"/>
         <jvmarg value="-Xss256k"/>
+        <jvmarg value="-Dcassandra.memtable_row_overhead_computation_step=100"/>
+        <jvmarg value="-Dcassandra.test.use_prepared=${cassandra.test.use_prepared}"/>
         <optjvmargs/>
         <classpath>
           <path refid="cassandra.classpath" />
@@ -1187,6 +1191,42 @@
     </testmacro>
   </target>
 
+  <target name="cql-test" depends="build-test" description="Execute CQL tests">
+    <testmacro suitename="cql" inputdir="${test.unit.src}"
+            timeout="${test.timeout}" filter="**/cql3/*Test.java"
+            forkmode="once">
+    </testmacro>
+  </target>
+
+  <target name="cql-test-some" depends="build-test" description="Execute specific CQL tests" >
+    <sequential>
+      <echo message="running ${test.methods} tests from ${test.name}"/>
+      <mkdir dir="${build.test.dir}/cassandra"/>
+      <mkdir dir="${build.test.dir}/output"/>
+      <junit fork="on" forkmode="once" failureproperty="testfailed" maxmemory="1024m" timeout="${test.timeout}">
+        <sysproperty key="net.sourceforge.cobertura.datafile" file="${cobertura.datafile}"/>
+        <formatter type="brief" usefile="false"/>
+        <jvmarg value="-Dstorage-config=${test.conf}"/>
+        <jvmarg value="-Djava.awt.headless=true"/>
+        <jvmarg value="-javaagent:${basedir}/lib/jamm-0.2.6.jar" />
+        <jvmarg value="-ea"/>
+        <jvmarg value="-Xss256k"/>
+        <jvmarg value="-Dcassandra.test.use_prepared=${cassandra.test.use_prepared}"/>
+        <jvmarg value="-Dcassandra.memtable_row_overhead_computation_step=100"/>
+        <classpath>
+          <path refid="cassandra.classpath" />
+          <pathelement location="${test.classes}"/>
+          <path refid="cobertura.classpath"/>
+          <pathelement location="${test.conf}"/>
+          <fileset dir="${test.lib}">
+            <include name="**/*.jar" />
+          </fileset>
+        </classpath>
+        <test name="org.apache.cassandra.cql3.${test.name}" methods="${test.methods}" todir="${build.test.dir}/output"/>
+      </junit>
+    </sequential>
+  </target>
+
   <target name="pig-test" depends="build-test,maven-ant-tasks-retrieve-pig-test" description="Excute Pig tests">
     <testmacro suitename="pig" inputdir="${test.pig.src}" 
                timeout="1200000">
@@ -1300,6 +1340,7 @@
 	<echo file=".classpath"><![CDATA[<?xml version="1.0" encoding="UTF-8"?>
 <classpath>
   <classpathentry kind="src" path="src/java"/>
+  <classpathentry kind="src" path="src/resources"/>
   <classpathentry kind="src" path="src/gen-java"/>
   <classpathentry kind="src" path="interface/thrift/gen-java"/>
   <classpathentry kind="src" path="test/unit"/>
