@@ -274,7 +274,7 @@ public class CreateTableStatement extends SchemaAlteringStatement
                 }
                 else
                 {
-                    List<AbstractType<?>> types = new ArrayList<AbstractType<?>>(columnAliases.size() + 1);
+                    List<AbstractType<?>> types = new ArrayList<AbstractType<?>>(columnAliases.size());
                     for (ColumnIdentifier t : columnAliases)
                     {
                         stmt.columnAliases.add(t.bytes);
