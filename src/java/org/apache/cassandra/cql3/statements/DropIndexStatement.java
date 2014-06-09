@@ -33,10 +33,10 @@ public class DropIndexStatement extends SchemaAlteringStatement
     public final String indexName;
     public final boolean ifExists;
 
-    public DropIndexStatement(String indexName, boolean ifExists)
+    public DropIndexStatement(IndexName indexName, boolean ifExists)
     {
-        super(new CFName());
-        this.indexName = indexName;
+        super(indexName.getCfName());
+        this.indexName = indexName.getIdx();
         this.ifExists = ifExists;
     }
 
@@ -60,14 +60,14 @@ public class DropIndexStatement extends SchemaAlteringStatement
         return ResultMessage.SchemaChange.Change.UPDATED;
     }
 
-    public void announceMigration() throws InvalidRequestException, ConfigurationException
+    public void announceMigration(boolean isLocalOnly) throws InvalidRequestException, ConfigurationException
     {
         CFMetaData cfm = findIndexedCF();
         if (cfm == null)
             return;
 
         CFMetaData updatedCfm = updateCFMetadata(cfm);
-        MigrationManager.announceColumnFamilyUpdate(updatedCfm, false);
+        MigrationManager.announceColumnFamilyUpdate(updatedCfm, false, isLocalOnly);
     }
 
     private CFMetaData updateCFMetadata(CFMetaData cfm)

@@ -27,6 +27,16 @@ Upgrading
 
 New features
 ------------
+   - Default data and log locations have changed.  If not set in
+     cassandra.yaml, the data file directory, commitlog directory,
+     and saved caches directory will default to $CASSANDRA_HOME/data/data,
+     $CASSANDRA_HOME/data/commitlog, and $CASSANDRA_HOME/data/saved_caches,
+     respectively.  The log directory now defaults to $CASSANDRA_HOME/logs.
+     If not set, $CASSANDRA_HOME, defaults to the top-level directory of
+     the installation.
+     Note that this should only affect source checkouts and tarballs.
+     Deb and RPM packages will continue to use /var/lib/cassandra and
+     /var/log/cassandra in cassandra.yaml.
    - SSTable data directory name is slightly changed. Each directory will
      have hex string appended after CF name, e.g.
          ks/cf-5be396077b811e3a3ab9dc4b9ac088d/
@@ -38,7 +48,9 @@ New features
      repaired are marked with a timestamp and not included in the next
      repair session. Use nodetool repair -par -inc to use this feature.
      A tool to manually mark/unmark sstables as repaired is available in
-     tools/bin/sstablerepairedset.
+     tools/bin/sstablerepairedset. This is particularly important when
+     using LCS, or any data not repaired in your first incremental repair
+     will be put back in L0.
    - Bootstrapping now ensures that range movements are consistent,
      meaning the data for the new node is taken from the node that is no 
      longer a responsible for that range of keys.  
@@ -67,6 +79,17 @@ Upgrading
      has been deprecated.
    - support for supercolumns has been removed from json2sstable
 
+
+2.0.9
+=====
+
+Operations
+----------
+    - Default values for read_repair_chance and local_read_repair_chance have been
+      swapped. Namely, default read_repair_chance is now set to 0.0, and default
+      local_read_repair_chance to 0.1.
+
+
 2.0.8
 =====
 
@@ -79,6 +102,7 @@ Upgrading
 ---------
     - Nothing specific to this release, but please see 2.0.7 if you are upgrading
       from a previous version.
+
 
 2.0.7
 =====

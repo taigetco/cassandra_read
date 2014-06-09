@@ -171,7 +171,7 @@ public class Auth
         if (username.equals(DEFAULT_SUPERUSER_NAME))
             return ConsistencyLevel.QUORUM;
         else
-            return ConsistencyLevel.ONE;
+            return ConsistencyLevel.LOCAL_ONE;
     }
 
     private static void setupAuthKeyspace()
@@ -181,7 +181,7 @@ public class Auth
             try
             {
                 KSMetaData ksm = KSMetaData.newKeyspace(AUTH_KS, SimpleStrategy.class.getName(), ImmutableMap.of("replication_factor", "1"), true);
-                MigrationManager.announceNewKeyspace(ksm, 0);
+                MigrationManager.announceNewKeyspace(ksm, 0, false);
             }
             catch (Exception e)
             {

@@ -533,6 +533,7 @@ public class SelectStatement implements CQLStatement, MeasurableForPreparedCache
 
     private SliceQueryFilter sliceFilter(ColumnSlice[] slices, int limit, int toGroup)
     {
+        assert ColumnSlice.validateSlices(slices, cfm.comparator, isReversed) : String.format("Invalid slices: " + Arrays.toString(slices) + (isReversed ? " (reversed)" : ""));
         return new SliceQueryFilter(slices, isReversed, limit, toGroup);
     }
 
@@ -777,7 +778,7 @@ public class SelectStatement implements CQLStatement, MeasurableForPreparedCache
     }
 
     private static List<Composite> buildBound(Bound bound,
-                                              Collection<ColumnDefinition> defs,
+                                              List<ColumnDefinition> defs,
                                               Restriction[] restrictions,
                                               boolean isReversed,
                                               CType type,
@@ -796,7 +797,7 @@ public class SelectStatement implements CQLStatement, MeasurableForPreparedCache
                 else if (firstRestriction.isIN())
                     return buildMultiColumnInBound(bound, defs, (MultiColumnRestriction.IN) firstRestriction, isReversed, builder, type, options);
                 else
-                    return buildMultiColumnEQBound(bound, (MultiColumnRestriction.EQ) firstRestriction, isReversed, builder, options);
+                    return buildMultiColumnEQBound(bound, defs, (MultiColumnRestriction.EQ) firstRestriction, isReversed, builder, options);
             }
         }
 
@@ -844,7 +845,7 @@ public class SelectStatement implements CQLStatement, MeasurableForPreparedCache
                             throw new InvalidRequestException(String.format("Invalid null clustering key part %s", def.name));
                         Composite prefix = builder.buildWith(val);
                         // See below for why this
-                        s.add((b == Bound.END && builder.remainingCount() > 0) ? prefix.end() : prefix);
+                        s.add((eocBound == Bound.END && builder.remainingCount() > 0) ? prefix.end() : prefix);
                     }
                     return new ArrayList<>(s);
                 }
@@ -862,7 +863,7 @@ public class SelectStatement implements CQLStatement, MeasurableForPreparedCache
         // case using the eoc would be bad, since for the random partitioner we have no guarantee that
         // prefix.end() will sort after prefix (see #5240).
         Composite prefix = builder.build();
-        return Collections.singletonList(bound == Bound.END && builder.remainingCount() > 0 ? prefix.end() : prefix);
+        return Collections.singletonList(eocBound == Bound.END && builder.remainingCount() > 0 ? prefix.end() : prefix);
     }
 
     private static Composite.EOC eocForRelation(Relation.Type op)
@@ -885,7 +886,7 @@ public class SelectStatement implements CQLStatement, MeasurableForPreparedCache
     }
 
     private static List<Composite> buildMultiColumnSliceBound(Bound bound,
-                                                              Collection<ColumnDefinition> defs,
+                                                              List<ColumnDefinition> defs,
                                                               MultiColumnRestriction.Slice slice,
                                                               boolean isReversed,
                                                               CBuilder builder,
@@ -910,22 +911,29 @@ public class SelectStatement implements CQLStatement, MeasurableForPreparedCache
         }
 
         List<ByteBuffer> vals = slice.componentBounds(firstComponentBound, options);
-        builder.add(vals.get(firstName.position()));
 
-        while(iter.hasNext())
+        ByteBuffer v = vals.get(firstName.position());
+        if (v == null)
+            throw new InvalidRequestException("Invalid null value in condition for column " + firstName.name);
+        builder.add(v);
+
+        while (iter.hasNext())
         {
             ColumnDefinition def = iter.next();
             if (def.position() >= vals.size())
                 break;
 
-            builder.add(vals.get(def.position()));
+            v = vals.get(def.position());
+            if (v == null)
+                throw new InvalidRequestException("Invalid null value in condition for column " + def.name);
+            builder.add(v);
         }
         Relation.Type relType = slice.getRelation(eocBound, firstComponentBound);
         return Collections.singletonList(builder.build().withEOC(eocForRelation(relType)));
     }
 
     private static List<Composite> buildMultiColumnInBound(Bound bound,
-                                                           Collection<ColumnDefinition> defs,
+                                                           List<ColumnDefinition> defs,
                                                            MultiColumnRestriction.IN restriction,
                                                            boolean isReversed,
                                                            CBuilder builder,
@@ -933,16 +941,19 @@ public class SelectStatement implements CQLStatement, MeasurableForPreparedCache
                                                            QueryOptions options) throws InvalidRequestException
     {
         List<List<ByteBuffer>> splitInValues = restriction.splitValues(options);
+        Bound eocBound = isReversed ? Bound.reverse(bound) : bound;
 
         // The IN query might not have listed the values in comparator order, so we need to re-sort
         // the bounds lists to make sure the slices works correctly (also, to avoid duplicates).
         TreeSet<Composite> inValues = new TreeSet<>(isReversed ? type.reverseComparator() : type);
-        Iterator<ColumnDefinition> iter = defs.iterator();
         for (List<ByteBuffer> components : splitInValues)
         {
+            for (int i = 0; i < components.size(); i++)
+                if (components.get(i) == null)
+                    throw new InvalidRequestException("Invalid null value in condition for column " + defs.get(i));
+
             Composite prefix = builder.buildWith(components);
-            Bound b = isReversed == isReversedType(iter.next()) ? bound : Bound.reverse(bound);
-            inValues.add(b == Bound.END && builder.remainingCount() - components.size() > 0
+            inValues.add(eocBound == Bound.END && builder.remainingCount() - components.size() > 0
                          ? prefix.end()
                          : prefix);
         }
@@ -950,14 +961,21 @@ public class SelectStatement implements CQLStatement, MeasurableForPreparedCache
     }
 
     private static List<Composite> buildMultiColumnEQBound(Bound bound,
+                                                           List<ColumnDefinition> defs,
                                                            MultiColumnRestriction.EQ restriction,
                                                            boolean isReversed,
                                                            CBuilder builder,
                                                            QueryOptions options) throws InvalidRequestException
     {
         Bound eocBound = isReversed ? Bound.reverse(bound) : bound;
-        for (ByteBuffer component : restriction.values(options))
+        List<ByteBuffer> values = restriction.values(options);
+        for (int i = 0; i < values.size(); i++)
+        {
+            ByteBuffer component = values.get(i);
+            if (component == null)
+                throw new InvalidRequestException("Invalid null value in condition for column " + defs.get(i));
             builder.add(component);
+        }
 
         Composite prefix = builder.build();
         return Collections.singletonList(builder.remainingCount() > 0 && eocBound == Bound.END
@@ -1893,7 +1911,7 @@ public class SelectStatement implements CQLStatement, MeasurableForPreparedCache
                     isReversed = b;
                     continue;
                 }
-                if (isReversed != b)
+                if (!isReversed.equals(b))
                     throw new InvalidRequestException(String.format("Unsupported order by relation"));
             }
             assert isReversed != null;

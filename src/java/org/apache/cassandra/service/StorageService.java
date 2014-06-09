@@ -787,7 +787,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
                         {
                             long nanoDelay = delay * 1000000L;
                             if (Gossiper.instance.getEndpointStateForEndpoint(existing).getUpdateTimestamp() > (System.nanoTime() - nanoDelay))
-                                throw new UnsupportedOperationException("Cannnot replace a live node... ");
+                                throw new UnsupportedOperationException("Cannot replace a live node... ");
                             current.add(existing);
                         }
                         else
@@ -890,7 +890,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
         if (Schema.instance.getKSMetaData(Tracing.TRACE_KS) == null)
         {
             KSMetaData tracingKeyspace = KSMetaData.traceKeyspace();
-            MigrationManager.announceNewKeyspace(tracingKeyspace, 0);
+            MigrationManager.announceNewKeyspace(tracingKeyspace, 0, false);
         }
 
         if (!isSurveyMode)
@@ -2978,7 +2978,8 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
             int index = (int) Math.round(i * step);
             Token token = tokens.get(index);
             Range<Token> range = new Range<>(prevToken, token);
-            splits.add(Pair.create(range, cfs.estimatedKeysForRange(range)));
+            // always return an estimate > 0 (see CASSANDRA-7322)
+            splits.add(Pair.create(range, Math.max(cfs.metadata.getMinIndexInterval(), cfs.estimatedKeysForRange(range))));
             prevToken = token;
         }
         return splits;
@@ -3097,8 +3098,9 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
 
     private Future<StreamState> streamHints()
     {
-        if (HintedHandOffManager.instance.listEndpointsPendingHints().size() == 0)
-            return Futures.immediateFuture(null);
+        // StreamPlan will not fail if there are zero files to transfer, so flush anyway (need to get any in-memory hints, as well)
+        ColumnFamilyStore hintsCF = Keyspace.open(Keyspace.SYSTEM_KS).getColumnFamilyStore(SystemKeyspace.HINTS_CF);
+        FBUtilities.waitOnFuture(hintsCF.forceFlush());
 
         // gather all live nodes in the cluster that aren't also leaving
         List<InetAddress> candidates = new ArrayList<>(StorageService.instance.getTokenMetadata().cloneAfterAllLeft().getAllEndpoints());

@@ -97,7 +97,7 @@ public class DropTypeStatement extends SchemaAlteringStatement
             if (name.getKeyspace().equals(ut.keyspace) && name.getUserTypeName().equals(ut.name))
                 return true;
 
-            for (AbstractType<?> subtype : ut.fieldTypes)
+            for (AbstractType<?> subtype : ut.fieldTypes())
                 if (isUsedBy(subtype))
                     return true;
         }
@@ -137,7 +137,7 @@ public class DropTypeStatement extends SchemaAlteringStatement
         return name.getKeyspace();
     }
 
-    public void announceMigration() throws InvalidRequestException, ConfigurationException
+    public void announceMigration(boolean isLocalOnly) throws InvalidRequestException, ConfigurationException
     {
         KSMetaData ksm = Schema.instance.getKSMetaData(name.getKeyspace());
         assert ksm != null;
@@ -145,6 +145,6 @@ public class DropTypeStatement extends SchemaAlteringStatement
         UserType toDrop = ksm.userTypes.getType(name.getUserTypeName());
         // Can be null with ifExists
         if (toDrop != null)
-            MigrationManager.announceTypeDrop(toDrop);
+            MigrationManager.announceTypeDrop(toDrop, isLocalOnly);
     }
 }

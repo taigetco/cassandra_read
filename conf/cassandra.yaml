@@ -93,18 +93,14 @@ partitioner: org.apache.cassandra.dht.Murmur3Partitioner
 # Directories where Cassandra should store data on disk.  Cassandra
 # will spread data evenly across them, subject to the granularity of
 # the configured compaction strategy.
-data_file_directories:
-    - /var/lib/cassandra/data
+# If not set, the default directory is $CASSANDRA_HOME/data/data.
+# data_file_directories:
+#     - /var/lib/cassandra/data
 
 # commit log.  when running on magnetic HDD, this should be a
 # separate spindle than the data directories.
-commitlog_directory: /var/lib/cassandra/commitlog
-
-# location to write flushing sstables to.  Ideally, this will also be
-# a separate spindle in HDD deployments.  If you only have two spindles,
-# have it share with the data spindle.  By default, this will point at the data
-# directory.
-# flush_directory: /var/lib/cassandra/flush
+# If not set, the default directory is $CASSANDRA_HOME/data/commitlog.
+# commitlog_directory: /var/lib/cassandra/commitlog
 
 # policy for data disk failures:
 # stop_paranoid: shut down gossip and Thrift even for single-sstable errors.
@@ -206,7 +202,8 @@ counter_cache_save_period: 7200
 # memory_allocator: NativeAllocator
 
 # saved caches
-saved_caches_directory: /var/lib/cassandra/saved_caches
+# If not set, the default directory is $CASSANDRA_HOME/data/saved_caches.
+# saved_caches_directory: /var/lib/cassandra/saved_caches
 
 # commitlog_sync may be either "periodic" or "batch." 
 # When in batch mode, Cassandra won't ack writes until the commit log
@@ -299,8 +296,8 @@ memtable_allocation_type: heap_buffers
 # This sets the amount of memtable flush writer threads.  These will
 # be blocked by disk io, and each one will hold a memtable in memory
 # while blocked. If your flush directory is backed by SSD, you may
-# want to increase this; by default it will be set to 2.
-#memtable_flush_writers: 2
+# want to increase this.
+memtable_flush_writers: 2
 
 # A fixed memory pool size in MB for for SSTable index summaries. If left
 # empty, this will default to 5% of the heap size. If the memory usage of

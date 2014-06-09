@@ -1,3 +1,20 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package org.apache.cassandra.thrift;
 
 import java.io.IOException;
@@ -114,9 +131,21 @@ public class MultiSliceTest extends SchemaLoader
         req.setCount(6);
         req.reversed = true;
         req.setColumn_slices(Arrays.asList(columnSliceFrom("e", "a"), columnSliceFrom("g", "d")));
-        assertColumnNameMatches(Arrays.asList("g", "e", "d", "c", "b", "a"), server.get_multi_slice(req)); 
+        assertColumnNameMatches(Arrays.asList("g", "f", "e", "d", "c", "b"), server.get_multi_slice(req));
     }
-    
+
+    @Test
+    public void test_with_overlap_with_count() throws TException
+    {
+        ColumnParent cp = new ColumnParent("Standard1");
+        ByteBuffer key = ByteBuffer.wrap("overlap_reversed_count".getBytes());
+        addTheAlphabetToRow(key, cp);
+        MultiSliceRequest req = makeMultiSliceRequest(key);
+        req.setCount(6);
+        req.setColumn_slices(Arrays.asList(columnSliceFrom("a", "e"), columnSliceFrom("d", "g"), columnSliceFrom("d", "g")));
+        assertColumnNameMatches(Arrays.asList("a", "b", "c", "d", "e", "f"), server.get_multi_slice(req));
+    }
+
     private static void addTheAlphabetToRow(ByteBuffer key, ColumnParent parent) 
             throws InvalidRequestException, UnavailableException, TimedOutException
     {
@@ -135,7 +164,7 @@ public class MultiSliceTest extends SchemaLoader
         for (int i = 0 ; i< expected.size() ; i++)
         {
             Assert.assertEquals(actual.get(i) +" did not equal "+ expected.get(i), 
-                    new String(actual.get(i).getColumn().getName()), expected.get(i));
+                    expected.get(i), new String(actual.get(i).getColumn().getName()));
         }
     }
     

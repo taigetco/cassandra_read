@@ -7,7 +7,31 @@
  * Allow compilation in java 8 (CASSANDRA-7208)
  * Make incremental repair default (CASSANDRA-7250)
 
+
+2.1.0
+ * Upgrade to Pig 0.12.1 (CASSANDRA-6556)
+ * Make sure we clear out repair sessions from netstats (CASSANDRA-7329)
+ * Don't fail streams on failure detector downs (CASSANDRA-3569)
+ * Add optional keyspace to DROP INDEX statement (CASSANDRA-7314)
+ * Reduce run time for CQL tests (CASSANDRA-7327)
+ * Fix heap size calculation on Windows (CASSANDRA-7352)
+ * RefCount native frames from netty (CASSANDRA-7245)
+ * Use tarball dir instead of /var for default paths (CASSANDRA-7136)
+Merged from 2.0:
+ * Add per-CF range read request latency metrics (CASSANDRA-7338)
+ * Fix NPE in StreamTransferTask.createMessageForRetry() (CASSANDRA-7323)
+ * Make StreamSession#closeSession() idempotent (CASSANDRA-7262)
+ * Fix infinite loop on exception while streaming (CASSANDRA-7330)
+Merged from 1.2:
+ * Fix potential / by 0 in HHOM page size calculation (CASSANDRA-7354)
+ * Use LOCAL_ONE for non-superuser auth queries (CASSANDRA-7328)
+
+
 2.1.0-rc1
+ * Revert flush directory (CASSANDRA-6357)
+ * More efficient executor service for fast operations (CASSANDRA-4718)
+ * Move less common tools into a new cassandra-tools package (CASSANDRA-7160)
+ * Support more concurrent requests in native protocol (CASSANDRA-7231)
  * Add tab-completion to debian nodetool packaging (CASSANDRA-6421)
  * Change concurrent_compactors defaults (CASSANDRA-7139)
  * Add PowerShell Windows launch scripts (CASSANDRA-7001)
@@ -34,9 +58,16 @@
  * Fix broken paging state with prepared statement (CASSANDRA-7120)
  * Fix IllegalArgumentException in CqlStorage (CASSANDRA-7287)
  * Allow nulls/non-existant fields in UDT (CASSANDRA-7206)
+ * Backport Thrift MultiSliceRequest (CASSANDRA-7027)
+ * Handle overlapping MultiSlices (CASSANDRA-7279)
+ * Fix DataOutputTest on Windows (CASSANDRA-7265)
+ * Embedded sets in user defined data-types are not updating (CASSANDRA-7267)
+ * Add tuple type to CQL/native protocol (CASSANDRA-7248)
+ * Fix CqlPagingRecordReader on tables with few rows (CASSANDRA-7322)
 Merged from 2.0:
  * Copy compaction options to make sure they are reloaded (CASSANDRA-7290)
  * Add option to do more aggressive tombstone compactions (CASSANDRA-6563)
+ * Don't try to compact already-compacting files in HHOM (CASSANDRA-7288)
  * Always reallocate buffers in HSHA (CASSANDRA-6285)
  * (Hadoop) support authentication in CqlRecordReader (CASSANDRA-7221)
  * (Hadoop) Close java driver Cluster in CQLRR.close (CASSANDRA-7228)
@@ -78,14 +109,21 @@ Merged from 2.0:
  * Fix 2ndary index queries with DESC clustering order (CASSANDRA-6950)
  * Invalid key cache entries on DROP (CASSANDRA-6525)
  * Fix flapping RecoveryManagerTest (CASSANDRA-7084)
- * Add missing iso8601 patterns for date strings (6973)
+ * Add missing iso8601 patterns for date strings (CASSANDRA-6973)
  * Support selecting multiple rows in a partition using IN (CASSANDRA-6875)
+ * Add authentication support to shuffle (CASSANDRA-6484)
+ * Swap local and global default read repair chances (CASSANDRA-7320)
+ * Add conditional CREATE/DROP USER support (CASSANDRA-7264)
+ * Cqlsh counts non-empty lines for "Blank lines" warning (CASSANDRA-7325)
 Merged from 1.2:
  * Add Cloudstack snitch (CASSANDRA-7147)
  * Update system.peers correctly when relocating tokens (CASSANDRA-7126)
  * Add Google Compute Engine snitch (CASSANDRA-7132)
  * remove duplicate query for local tokens (CASSANDRA-7182)
  * exit CQLSH with error status code if script fails (CASSANDRA-6344)
+ * Fix bug with some IN queries missig results (CASSANDRA-7105)
+ * Fix availability validation for LOCAL_ONE CL (CASSANDRA-7319)
+ * Hint streaming can cause decommission to fail (CASSANDRA-7219)
 
 
 2.1.0-beta2

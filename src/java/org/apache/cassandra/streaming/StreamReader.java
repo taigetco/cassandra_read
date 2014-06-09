@@ -110,7 +110,7 @@ public class StreamReader
 
     protected SSTableWriter createWriter(ColumnFamilyStore cfs, long totalSize, long repairedAt) throws IOException
     {
-        Directories.DataDirectory localDir = cfs.directories.getCompactionLocation();
+        Directories.DataDirectory localDir = cfs.directories.getWriteableLocation();
         if (localDir == null)
             throw new IOException("Insufficient disk space to store " + totalSize + " bytes");
         desc = Descriptor.fromFilename(cfs.getTempSSTablePath(cfs.directories.getLocationForDisk(localDir)));
@@ -121,9 +121,20 @@ public class StreamReader
     protected void drain(InputStream dis, long bytesRead) throws IOException
     {
         long toSkip = totalSize() - bytesRead;
-        toSkip = toSkip - dis.skip(toSkip);
+
+        // InputStream.skip can return -1 if dis is inaccessible.
+        long skipped = dis.skip(toSkip);
+        if (skipped == -1)
+            return;
+
+        toSkip = toSkip - skipped;
         while (toSkip > 0)
-            toSkip = toSkip - dis.skip(toSkip);
+        {
+            skipped = dis.skip(toSkip);
+            if (skipped == -1)
+                break;
+            toSkip = toSkip - skipped;
+        }
     }
 
     protected long totalSize()
