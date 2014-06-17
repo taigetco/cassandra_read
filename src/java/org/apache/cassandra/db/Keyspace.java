@@ -29,11 +29,9 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Future;
-import java.util.concurrent.locks.Lock;
 
 import com.google.common.base.Function;
 import com.google.common.collect.Iterables;
-import com.google.common.util.concurrent.Striped;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -52,6 +50,7 @@ import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.service.pager.QueryPagers;
 import org.apache.cassandra.tracing.Tracing;
 import org.apache.cassandra.utils.concurrent.OpOrder;
+import org.apache.cassandra.metrics.KeyspaceMetrics;
 
 /**
  * It represents a Keyspace.
@@ -63,7 +62,7 @@ public class Keyspace
 
     private static final Logger logger = LoggerFactory.getLogger(Keyspace.class);
 
-    private static final Striped<Lock> counterLocks = Striped.lazyWeakLock(DatabaseDescriptor.getConcurrentCounterWriters() * 1024);
+    public final KeyspaceMetrics metric;
 
     // It is possible to call Keyspace.open without a running daemon, so it makes sense to ensure
     // proper directories here as well as in CassandraDaemon.
@@ -79,6 +78,7 @@ public class Keyspace
     /* ColumnFamilyStore per column family */
     private final ConcurrentMap<UUID, ColumnFamilyStore> columnFamilyStores = new ConcurrentHashMap<UUID, ColumnFamilyStore>();
     private volatile AbstractReplicationStrategy replicationStrategy;
+
     public static final Function<String,Keyspace> keyspaceTransformer = new Function<String, Keyspace>()
     {
         public Keyspace apply(String keyspaceName)
@@ -145,6 +145,7 @@ public class Keyspace
             {
                 for (ColumnFamilyStore cfs : t.getColumnFamilyStores())
                     t.unloadCf(cfs);
+                t.metric.release();
             }
             return t;
         }
@@ -185,15 +186,6 @@ public class Keyspace
         if (cfs == null)
             throw new IllegalArgumentException("Unknown CF " + id);
         return cfs;
-    }
-
-    /**
-     * @param keys the keys to grab the locks for
-     * @return the striped lock instances
-     */
-    public static Iterable<Lock> counterLocksFor(Iterable<Object> keys)
-    {
-        return counterLocks.bulkGet(keys);
     }
 
     /**
@@ -286,6 +278,7 @@ public class Keyspace
             logger.debug("Initializing {}.{}", getName(), cfm.cfName);
             initCf(cfm.cfId, cfm.cfName, loadSSTables);
         }
+        this.metric = new KeyspaceMetrics(this);
     }
 
     public void createReplicationStrategy(KSMetaData ksm)
