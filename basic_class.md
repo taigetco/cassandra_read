@@ -27,7 +27,7 @@
 
 ####DynamicEndpointSnitch的使用情况
 
- 1. 参数配置
+ 1. 参数配置  
     UPDATE_INTERVAL_IN_MS  
     RESET_INTERVAL_IN_MS  
     BADNESS_THRESHOLD  
