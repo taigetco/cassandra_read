@@ -37,7 +37,7 @@
     WINDOW_SIZE = 100
  3. 定时线程  
     * updateScores线程：  
-    >注册`receiveTiming(InetAddress address, long latency)`到`MessagingService`, 来接收每个节点的latency, 只注册一次。  
+    >>注册`receiveTiming(InetAddress address, long latency)`到`MessagingService`, 来接收每个节点的latency, 只注册一次。  
     更新cores列表，?TODO
     * reset线程
-    >清空samples中的所有数据
+    >>清空samples中的所有数据
