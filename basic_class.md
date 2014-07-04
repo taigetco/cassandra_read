@@ -43,8 +43,7 @@
         更新cores列表  
     * reset线程  
         清空samples中的所有数据
-    
-4. 关于数据更新  
+ 4. 关于数据更新  
     通过`receiveTiming`接收的数据会写入`samples`中，`ExponentiallyDecayingSample.update(latency)`。  
     在updateScroes中从所有节点选取`maxLatency`, 每个节点的`score = median lantenty /maxLatency + severity`。  
     Severity来自` StorageService.instance.getSeverity(endpoint)`，它是一个测量compaction activity的数据(CASSANDRA-3722).
