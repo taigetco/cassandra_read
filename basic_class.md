@@ -32,3 +32,12 @@
     RESET_INTERVAL_IN_MS  
     BADNESS_THRESHOLD  
     ```If set greater than zero and read_repair_chance is < 1.0, this will allow 'pinning'(固定) of replicas to hosts in order to increase cache capacity. The badness threshold will control how much worse the pinned host has to be before the dynamic snitch will prefer other replicas over it(切换). This is expressed as a double which represents a percentage. Thus, a value of 0.2 means Cassandra would continue to prefer the static snitch values until the pinned host was 20% worse than the fastest.```
+ 2. 固定参数  
+    ALPHA = 0.75
+    WINDOW_SIZE = 100
+ 3. 定时线程  
+    * updateScores线程：  
+    >注册`receiveTiming(InetAddress address, long latency)`到`MessagingService`, 来接收每个节点的latency, 只注册一次。  
+    更新cores列表，?TODO
+    * reset线程
+    >清空samples中的所有数据
