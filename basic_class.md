@@ -48,4 +48,5 @@
     在updateScroes中从所有节点选取`maxLatency`, 每个节点的`score = median lantenty /maxLatency + severity`。  
     Severity来自` StorageService.instance.getSeverity(endpoint)`，它是一个测量compaction activity的数据(CASSANDRA-3722).
  5. 关于sortByProximity
-    如果`BADNESS_THRESHOLD==0`，结点直接按照scores来排序，否则
+    如果`BADNESS_THRESHOLD==0`，结点直接按照scores来排序，否则socre加上BADNESS_THRESHOLD做对比来sort，可以参考BADNESS_THRESHOLD的说明
+ 6. 关于isWorthMergingForRangeQuery方法
