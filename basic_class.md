@@ -1,6 +1,15 @@
 ##基础类解释
 ----------
+###Gossip相关classes
+----
+###`EndpointState` 代表HeartBeatState和ApplicationState，Any state for a given endpoint can be retrieved from this instance
+    HeartBeatState hbState
+    Map<ApplicationState, VersionedValue> applicationState
+    updateTimestamp
+    isAlive
 
+###客户端相关classes
+----
 ###`QueryState` 关于一个query的状态
     Frame #CQL binary protocol is a frame based protocol, 整个query source
     clock
@@ -45,8 +54,9 @@
         清空samples中的所有数据
  4. 关于数据更新  
     通过`receiveTiming`接收的数据会写入`samples`中，`ExponentiallyDecayingSample.update(latency)`。  
-    在updateScroes中从所有节点选取`maxLatency`, 每个节点的`score = median lantenty /maxLatency + severity`。  
+    在updateScroes中从所有节点选取`maxLatency`, 每个节点的`score = median lantency /maxLatency + severity`。  
     Severity来自` StorageService.instance.getSeverity(endpoint)`，它是一个测量compaction activity的数据(CASSANDRA-3722).
- 5. 关于sortByProximity
+ 5. 关于sortByProximity方法
     如果`BADNESS_THRESHOLD==0`，结点直接按照scores来排序，否则socre加上BADNESS_THRESHOLD做对比来sort，可以参考BADNESS_THRESHOLD的说明
  6. 关于isWorthMergingForRangeQuery方法
+
