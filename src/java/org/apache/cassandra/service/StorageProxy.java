@@ -1797,7 +1797,8 @@ public class StorageProxy implements StorageProxyMBean
 
         TokenMetadata tokenMetadata = StorageService.instance.getTokenMetadata();
 
-        List<AbstractBounds<T>> ranges = new ArrayList<AbstractBounds<T>>();
+		List<AbstractBounds<T>> ranges = new ArrayList<>();
+		
         // divide the queryRange into pieces delimited by the ring and minimum tokens
         Iterator<Token> ringIter = TokenMetadata.ringIterator(tokenMetadata.sortedTokens(), queryRange.left.getToken(), true);
         AbstractBounds<T> remainder = queryRange;

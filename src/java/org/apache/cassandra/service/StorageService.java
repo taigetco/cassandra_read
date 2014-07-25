@@ -541,7 +541,9 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
         if (Boolean.parseBoolean(System.getProperty("cassandra.load_ring_state", "true")))
         {
             logger.info("Loading persisted ring state");
+            //SELECT peer, tokens FROM system.peers
             Multimap<InetAddress, Token> loadedTokens = SystemKeyspace.loadTokens();
+            //SELECT peer, host_id FROM system.peers
             Map<InetAddress, UUID> loadedHostIds = SystemKeyspace.loadHostIds();
             for (InetAddress ep : loadedTokens.keySet())
             {
