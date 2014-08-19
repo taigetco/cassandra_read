@@ -187,31 +187,26 @@ public class CommitLogSegment
     }
 
     /**
-     * allocate space in this buffer for the provided mutation, and populate the provided
-     * Allocation object, returning true on success. False indicates there is not enough room in
-     * this segment, and a new segment is needed
+     * Allocate space in this buffer for the provided mutation, and return the allocated Allocation object.
+     * Returns null if there is not enough space in this segment, and a new segment is needed.
      */
-    boolean allocate(Mutation mutation, int size, Allocation alloc)
+    Allocation allocate(Mutation mutation, int size)
     {
-        final OpOrder.Group commandOrder = appendOrder.start();
+        final OpOrder.Group opGroup = appendOrder.start();
         try
         {
             int position = allocate(size);
             if (position < 0)
             {
-                commandOrder.close();
-                return false;
+                opGroup.close();
+                return null;
             }
-            alloc.buffer = (ByteBuffer) buffer.duplicate().position(position).limit(position + size);
-            alloc.position = position;
-            alloc.segment = this;
-            alloc.appendOp = commandOrder;
             markDirty(mutation, position);
-            return true;
+            return new Allocation(this, opGroup, position, (ByteBuffer) buffer.duplicate().position(position).limit(position + size));
         }
         catch (Throwable t)
         {
-            commandOrder.close();
+            opGroup.close();
             throw t;
         }
     }
@@ -258,12 +253,10 @@ public class CommitLogSegment
     /**
      * Wait for any appends or discardUnusedTail() operations started before this method was called
      */
-    private synchronized void waitForModifications()
+    void waitForModifications()
     {
         // issue a barrier and wait for it
-        OpOrder.Barrier barrier = appendOrder.newBarrier();
-        barrier.issue();
-        barrier.await();
+        appendOrder.awaitNewBarrier();
     }
 
     /**
@@ -445,7 +438,7 @@ public class CommitLogSegment
             // check for deleted CFS
             CFMetaData cfm = columnFamily.metadata();
             if (cfm.isPurged())
-                logger.error("Attempted to write commit log entry for unrecognized column family: {}", columnFamily.id());
+                logger.error("Attempted to write commit log entry for unrecognized table: {}", columnFamily.id());
             else
                 ensureAtleast(cfDirty, cfm.cfId, allocatedPosition);
         }
@@ -596,10 +589,18 @@ public class CommitLogSegment
     static class Allocation
     {
 
-        private CommitLogSegment segment;
-        private OpOrder.Group appendOp;
-        private int position;
-        private ByteBuffer buffer;
+        private final CommitLogSegment segment;
+        private final OpOrder.Group appendOp;
+        private final int position;
+        private final ByteBuffer buffer;
+
+        Allocation(CommitLogSegment segment, OpOrder.Group appendOp, int position, ByteBuffer buffer)
+        {
+            this.segment = segment;
+            this.appendOp = appendOp;
+            this.position = position;
+            this.buffer = buffer;
+        }
 
         CommitLogSegment getSegment()
         {
@@ -632,9 +633,7 @@ public class CommitLogSegment
 
         public ReplayPosition getReplayPosition()
         {
-            // always allocate a ReplayPosition to let stack allocation do its magic. If we return null, we always
-            // have to allocate an object on the stack
-            return new ReplayPosition(segment == null ? -1 : segment.id, segment == null ? 0 : buffer.limit());
+            return new ReplayPosition(segment.id, buffer.limit());
         }
 
     }

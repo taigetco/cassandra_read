@@ -218,6 +218,8 @@ public abstract class Event
             this.target = target;
             this.keyspace = keyspace;
             this.tableOrType = tableOrType;
+            if (target != Target.KEYSPACE)
+                assert this.tableOrType != null : "Table or type should be set for non-keyspace schema change events";
         }
 
         public SchemaChange(Change change, String keyspace)
@@ -226,7 +228,7 @@ public abstract class Event
         }
 
         // Assumes the type has already been deserialized
-        private static SchemaChange deserializeEvent(ByteBuf cb, int version)
+        public static SchemaChange deserializeEvent(ByteBuf cb, int version)
         {
             Change change = CBUtil.readEnumValue(Change.class, cb);
             if (version >= 3)
@@ -244,7 +246,7 @@ public abstract class Event
             }
         }
 
-        protected void serializeEvent(ByteBuf dest, int version)
+        public void serializeEvent(ByteBuf dest, int version)
         {
             if (version >= 3)
             {
@@ -262,7 +264,7 @@ public abstract class Event
             }
         }
 
-        protected int eventSerializedSize(int version)
+        public int eventSerializedSize(int version)
         {
             if (version >= 3)
             {

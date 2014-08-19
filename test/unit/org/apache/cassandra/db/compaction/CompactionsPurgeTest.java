@@ -22,8 +22,14 @@ import java.util.Collection;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 
+import org.apache.cassandra.cache.CachingOptions;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.KSMetaData;
 import org.apache.cassandra.db.*;
 
+import org.apache.cassandra.exceptions.ConfigurationException;
+import org.apache.cassandra.locator.SimpleStrategy;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.apache.cassandra.SchemaLoader;
@@ -45,10 +51,43 @@ import static org.apache.cassandra.Util.cellname;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 
-public class CompactionsPurgeTest extends SchemaLoader
+public class CompactionsPurgeTest
 {
-    public static final String KEYSPACE1 = "Keyspace1";
-    public static final String KEYSPACE2 = "Keyspace2";
+    private static final String KEYSPACE1 = "CompactionsPurgeTest1";
+    private static final String CF_STANDARD1 = "Standard1";
+    private static final String CF_STANDARD2 = "Standard2";
+    private static final String KEYSPACE2 = "CompactionsPurgeTest2";
+    private static final String KEYSPACE_CACHED = "CompactionsPurgeTestCached";
+    private static final String CF_CACHED = "CachedCF";
+    private static final String KEYSPACE_CQL = "cql_keyspace";
+    private static final String CF_CQL = "table1";
+
+    @BeforeClass
+    public static void defineSchema() throws ConfigurationException
+    {
+        SchemaLoader.prepareServer();
+        SchemaLoader.createKeyspace(KEYSPACE1,
+                                    SimpleStrategy.class,
+                                    KSMetaData.optsWithRF(1),
+                                    SchemaLoader.standardCFMD(KEYSPACE1, CF_STANDARD1),
+                                    SchemaLoader.standardCFMD(KEYSPACE1, CF_STANDARD2));
+        SchemaLoader.createKeyspace(KEYSPACE2,
+                                    SimpleStrategy.class,
+                                    KSMetaData.optsWithRF(1),
+                                    SchemaLoader.standardCFMD(KEYSPACE2, CF_STANDARD1));
+        SchemaLoader.createKeyspace(KEYSPACE_CACHED,
+                                    SimpleStrategy.class,
+                                    KSMetaData.optsWithRF(1),
+                                    SchemaLoader.standardCFMD(KEYSPACE_CACHED, CF_CACHED).caching(CachingOptions.ALL));
+        SchemaLoader.createKeyspace(KEYSPACE_CQL,
+                                    SimpleStrategy.class,
+                                    KSMetaData.optsWithRF(1),
+                                    CFMetaData.compile("CREATE TABLE " + CF_CQL + " ("
+                                                     + "k int PRIMARY KEY,"
+                                                     + "v1 text,"
+                                                     + "v2 int"
+                                                     + ")", KEYSPACE_CQL));
+    }
 
     @Test
     public void testMajorCompactionPurge() throws ExecutionException, InterruptedException
@@ -68,7 +107,7 @@ public class CompactionsPurgeTest extends SchemaLoader
         {
             rm.add(cfName, cellname(String.valueOf(i)), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
         }
-        rm.apply();
+        rm.applyUnsafe();
         cfs.forceBlockingFlush();
 
         // deletes
@@ -76,14 +115,14 @@ public class CompactionsPurgeTest extends SchemaLoader
         {
             rm = new Mutation(KEYSPACE1, key.getKey());
             rm.delete(cfName, cellname(String.valueOf(i)), 1);
-            rm.apply();
+            rm.applyUnsafe();
         }
         cfs.forceBlockingFlush();
 
         // resurrect one column
         rm = new Mutation(KEYSPACE1, key.getKey());
         rm.add(cfName, cellname(String.valueOf(5)), ByteBufferUtil.EMPTY_BYTE_BUFFER, 2);
-        rm.apply();
+        rm.applyUnsafe();
         cfs.forceBlockingFlush();
 
         // major compact and test that all columns but the resurrected one is completely gone
@@ -113,7 +152,7 @@ public class CompactionsPurgeTest extends SchemaLoader
             {
                 rm.add(cfName, cellname(String.valueOf(i)), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
             }
-            rm.apply();
+            rm.applyUnsafe();
             cfs.forceBlockingFlush();
 
             // deletes
@@ -121,7 +160,7 @@ public class CompactionsPurgeTest extends SchemaLoader
             {
                 rm = new Mutation(KEYSPACE2, key.getKey());
                 rm.delete(cfName, cellname(String.valueOf(i)), 1);
-                rm.apply();
+                rm.applyUnsafe();
             }
             cfs.forceBlockingFlush();
         }
@@ -135,7 +174,7 @@ public class CompactionsPurgeTest extends SchemaLoader
         Collection<SSTableReader> sstablesIncomplete = cfs.getSSTables();
         rm = new Mutation(KEYSPACE2, key1.getKey());
         rm.add(cfName, cellname(String.valueOf(5)), ByteBufferUtil.EMPTY_BYTE_BUFFER, 2);
-        rm.apply();
+        rm.applyUnsafe();
         cfs.forceBlockingFlush();
         cfs.getCompactionStrategy().getUserDefinedTask(sstablesIncomplete, Integer.MAX_VALUE).execute(null);
 
@@ -168,19 +207,19 @@ public class CompactionsPurgeTest extends SchemaLoader
         rm = new Mutation(KEYSPACE2, key3.getKey());
         rm.add(cfName, cellname("c1"), ByteBufferUtil.EMPTY_BYTE_BUFFER, 8);
         rm.add(cfName, cellname("c2"), ByteBufferUtil.EMPTY_BYTE_BUFFER, 8);
-        rm.apply();
+        rm.applyUnsafe();
         cfs.forceBlockingFlush();
         // delete c1
         rm = new Mutation(KEYSPACE2, key3.getKey());
         rm.delete(cfName, cellname("c1"), 10);
-        rm.apply();
+        rm.applyUnsafe();
         cfs.forceBlockingFlush();
         Collection<SSTableReader> sstablesIncomplete = cfs.getSSTables();
 
         // delete c2 so we have new delete in a diffrent SSTable
         rm = new Mutation(KEYSPACE2, key3.getKey());
         rm.delete(cfName, cellname("c2"), 9);
-        rm.apply();
+        rm.applyUnsafe();
         cfs.forceBlockingFlush();
 
         // compact the sstables with the c1/c2 data and the c1 tombstone
@@ -211,14 +250,14 @@ public class CompactionsPurgeTest extends SchemaLoader
         {
             rm.add(cfName, cellname(String.valueOf(i)), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
         }
-        rm.apply();
+        rm.applyUnsafe();
 
         // deletes
         for (int i = 0; i < 5; i++)
         {
             rm = new Mutation(KEYSPACE1, key.getKey());
             rm.delete(cfName, cellname(String.valueOf(i)), 1);
-            rm.apply();
+            rm.applyUnsafe();
         }
         cfs.forceBlockingFlush();
         assertEquals(String.valueOf(cfs.getSSTables()), 1, cfs.getSSTables().size()); // inserts & deletes were in the same memtable -> only deletes in sstable
@@ -235,8 +274,8 @@ public class CompactionsPurgeTest extends SchemaLoader
     {
         CompactionManager.instance.disableAutoCompaction();
 
-        String keyspaceName = "RowCacheSpace";
-        String cfName = "CachedCF";
+        String keyspaceName = KEYSPACE_CACHED;
+        String cfName = CF_CACHED;
         Keyspace keyspace = Keyspace.open(keyspaceName);
         ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfName);
 
@@ -249,7 +288,7 @@ public class CompactionsPurgeTest extends SchemaLoader
         {
             rm.add(cfName, cellname(String.valueOf(i)), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
         }
-        rm.apply();
+        rm.applyUnsafe();
 
         // move the key up in row cache
         cfs.getColumnFamily(QueryFilter.getIdentityFilter(key, cfName, System.currentTimeMillis()));
@@ -257,7 +296,7 @@ public class CompactionsPurgeTest extends SchemaLoader
         // deletes row
         rm = new Mutation(keyspaceName, key.getKey());
         rm.delete(cfName, 1);
-        rm.apply();
+        rm.applyUnsafe();
 
         // flush and major compact
         cfs.forceBlockingFlush();
@@ -269,7 +308,7 @@ public class CompactionsPurgeTest extends SchemaLoader
         {
             rm.add(cfName, cellname(String.valueOf(i)), ByteBufferUtil.EMPTY_BYTE_BUFFER, 0);
         }
-        rm.apply();
+        rm.applyUnsafe();
 
         // Check that the second insert did went in
         ColumnFamily cf = cfs.getColumnFamily(QueryFilter.getIdentityFilter(key, cfName, System.currentTimeMillis()));
@@ -283,7 +322,7 @@ public class CompactionsPurgeTest extends SchemaLoader
     {
         CompactionManager.instance.disableAutoCompaction();
 
-        String keyspaceName = "Keyspace1";
+        String keyspaceName = KEYSPACE1;
         String cfName = "Standard1";
         Keyspace keyspace = Keyspace.open(keyspaceName);
         ColumnFamilyStore cfs = keyspace.getColumnFamilyStore(cfName);
@@ -295,12 +334,12 @@ public class CompactionsPurgeTest extends SchemaLoader
         rm = new Mutation(keyspaceName, key.getKey());
         for (int i = 0; i < 10; i++)
             rm.add(cfName, cellname(String.valueOf(i)), ByteBufferUtil.EMPTY_BYTE_BUFFER, i);
-        rm.apply();
+        rm.applyUnsafe();
 
         // deletes row with timestamp such that not all columns are deleted
         rm = new Mutation(keyspaceName, key.getKey());
         rm.delete(cfName, 4);
-        rm.apply();
+        rm.applyUnsafe();
         ColumnFamily cf = cfs.getColumnFamily(filter);
         assertTrue(cf.isMarkedForDelete());
 
@@ -313,7 +352,7 @@ public class CompactionsPurgeTest extends SchemaLoader
         rm = new Mutation(keyspaceName, key.getKey());
         for (int i = 0; i < 5; i++)
             rm.add(cfName, cellname(String.valueOf(i)), ByteBufferUtil.EMPTY_BYTE_BUFFER, i);
-        rm.apply();
+        rm.applyUnsafe();
 
         // Check that the second insert went in
         cf = cfs.getColumnFamily(filter);

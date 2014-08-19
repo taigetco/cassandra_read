@@ -116,11 +116,6 @@ public class Util
         return new BufferExpiringCell(cellname(name), ByteBufferUtil.bytes(value), timestamp, ttl);
     }
 
-    public static Cell counterColumn(String name, long value, long timestamp)
-    {
-        return new BufferCounterUpdateCell(cellname(name), value, timestamp);
-    }
-
     public static Token token(String key)
     {
         return StorageService.getPartitioner().getToken(ByteBufferUtil.bytes(key));
@@ -195,7 +190,7 @@ public class Util
         UUID cfid = first.getColumnFamilyIds().iterator().next();
 
         for (Mutation rm : mutations)
-            rm.apply();
+            rm.applyUnsafe();
 
         ColumnFamilyStore store = Keyspace.open(keyspaceName).getColumnFamilyStore(cfid);
         store.forceBlockingFlush();
@@ -205,7 +200,7 @@ public class Util
     public static ColumnFamily getColumnFamily(Keyspace keyspace, DecoratedKey key, String cfName)
     {
         ColumnFamilyStore cfStore = keyspace.getColumnFamilyStore(cfName);
-        assert cfStore != null : "Column family " + cfName + " has not been defined";
+        assert cfStore != null : "Table " + cfName + " has not been defined";
         return cfStore.getColumnFamily(QueryFilter.getIdentityFilter(key, cfName, System.currentTimeMillis()));
     }
 

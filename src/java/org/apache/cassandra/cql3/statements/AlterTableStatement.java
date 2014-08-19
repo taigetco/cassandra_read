@@ -29,7 +29,7 @@ import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.exceptions.*;
 import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.MigrationManager;
-import org.apache.cassandra.transport.messages.ResultMessage;
+import org.apache.cassandra.transport.Event;
 
 import static org.apache.cassandra.thrift.ThriftValidation.validateColumnFamily;
 
@@ -226,7 +226,7 @@ public class AlterTableStatement extends SchemaAlteringStatement
                 break;
             case OPTS:
                 if (cfProps == null)
-                    throw new InvalidRequestException(String.format("ALTER COLUMNFAMILY WITH invoked, but no parameters found"));
+                    throw new InvalidRequestException(String.format("ALTER TABLE WITH invoked, but no parameters found"));
 
                 cfProps.validate();
                 cfProps.applyToCFMetadata(cfm);
@@ -249,8 +249,8 @@ public class AlterTableStatement extends SchemaAlteringStatement
                              validator);
     }
 
-    public ResultMessage.SchemaChange.Change changeType()
+    public Event.SchemaChange changeEvent()
     {
-        return ResultMessage.SchemaChange.Change.UPDATED;
+        return new Event.SchemaChange(Event.SchemaChange.Change.UPDATED, Event.SchemaChange.Target.TABLE, keyspace(), columnFamily());
     }
 }

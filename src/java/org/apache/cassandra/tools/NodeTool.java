@@ -39,7 +39,6 @@ import com.yammer.metrics.reporting.JmxReporter;
 import io.airlift.command.*;
 
 import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutorMBean;
-import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.db.ColumnFamilyStoreMBean;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.db.compaction.CompactionManagerMBean;
@@ -192,7 +191,7 @@ public class NodeTool
             SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss,SSS");
             writer.append(sdf.format(new Date())).append(": ").append(cmdLine).append(System.lineSeparator());
         }
-        catch (IOException ioe)
+        catch (IOException | IOError ioe)
         {
             //quietly ignore any errors about not being able to write out history
         }
@@ -432,8 +431,12 @@ public class NodeTool
         {
             Map<String, String> tokensToEndpoints = probe.getTokenToEndpointMap();
             LinkedHashMultimap<String, String> endpointsToTokens = LinkedHashMultimap.create();
+            boolean haveVnodes = false;
             for (Map.Entry<String, String> entry : tokensToEndpoints.entrySet())
+            {
+                haveVnodes |= endpointsToTokens.containsKey(entry.getValue());
                 endpointsToTokens.put(entry.getValue(), entry.getKey());
+            }
 
             int maxAddressLength = Collections.max(endpointsToTokens.keys(), new Comparator<String>()
             {
@@ -461,7 +464,7 @@ public class NodeTool
             for (Entry<String, SetHostStat> entry : getOwnershipByDc(probe, resolveIp, tokensToEndpoints, ownerships).entrySet())
                 printDc(probe, format, entry.getKey(), endpointsToTokens, entry.getValue());
 
-            if (DatabaseDescriptor.getNumTokens() > 1)
+            if (haveVnodes)
             {
                 System.out.println("  Warning: \"nodetool ring\" is used to output all the tokens of a node.");
                 System.out.println("  To view status related info of a node use \"nodetool status\" instead.\n");
@@ -602,13 +605,13 @@ public class NodeTool
         }
     }
 
-    @Command(name = "cfstats", description = "Print statistics on column families")
+    @Command(name = "cfstats", description = "Print statistics on tables")
     public static class CfStats extends NodeToolCmd
     {
-        @Arguments(usage = "[<keyspace.cfname>...]", description = "List of column families (or keyspace) names")
+        @Arguments(usage = "[<keyspace.table>...]", description = "List of tables (or keyspace) names")
         private List<String> cfnames = new ArrayList<>();
 
-        @Option(name = "-i", description = "Ignore the list of column families and display the remaining cfs")
+        @Option(name = "-i", description = "Ignore the list of tables and display the remaining cfs")
         private boolean ignore = false;
 
         @Override
@@ -821,15 +824,15 @@ public class NodeTool
             {
                 for (String ks : filter.keySet())
                     if (verifier.get(ks).size() > 0)
-                        throw new IllegalArgumentException("Unknown column families: " + verifier.get(ks).toString() + " in keyspace: " + ks);
+                        throw new IllegalArgumentException("Unknown tables: " + verifier.get(ks).toString() + " in keyspace: " + ks);
             }
         }
     }
 
-    @Command(name = "cfhistograms", description = "Print statistic histograms for a given column family")
+    @Command(name = "cfhistograms", description = "Print statistic histograms for a given table")
     public static class CfHistograms extends NodeToolCmd
     {
-        @Arguments(usage = "<keyspace> <cfname>", description = "The keyspace and column family name")
+        @Arguments(usage = "<keyspace> <table>", description = "The keyspace and table name")
         private List<String> args = new ArrayList<>();
 
         @Override
@@ -893,7 +896,7 @@ public class NodeTool
     @Command(name = "cleanup", description = "Triggers the immediate cleanup of keys no longer belonging to a node. By default, clean all keyspaces")
     public static class Cleanup extends NodeToolCmd
     {
-        @Arguments(usage = "[<keyspace> <cfnames>...]", description = "The keyspace followed by one or many column families")
+        @Arguments(usage = "[<keyspace> <tables>...]", description = "The keyspace followed by one or many tables")
         private List<String> args = new ArrayList<>();
 
         @Override
@@ -954,10 +957,10 @@ public class NodeTool
         }
     }
 
-    @Command(name = "compact", description = "Force a (major) compaction on one or more column families")
+    @Command(name = "compact", description = "Force a (major) compaction on one or more tables")
     public static class Compact extends NodeToolCmd
     {
-        @Arguments(usage = "[<keyspace> <cfnames>...]", description = "The keyspace followed by one or many column families")
+        @Arguments(usage = "[<keyspace> <tables>...]", description = "The keyspace followed by one or many tables")
         private List<String> args = new ArrayList<>();
 
         @Override
@@ -979,10 +982,10 @@ public class NodeTool
         }
     }
 
-    @Command(name = "flush", description = "Flush one or more column families")
+    @Command(name = "flush", description = "Flush one or more tables")
     public static class Flush extends NodeToolCmd
     {
-        @Arguments(usage = "[<keyspace> <cfnames>...]", description = "The keyspace followed by one or many column families")
+        @Arguments(usage = "[<keyspace> <tables>...]", description = "The keyspace followed by one or many tables")
         private List<String> args = new ArrayList<>();
 
         @Override
@@ -1004,10 +1007,10 @@ public class NodeTool
         }
     }
 
-    @Command(name = "scrub", description = "Scrub (rebuild sstables for) one or more column families")
+    @Command(name = "scrub", description = "Scrub (rebuild sstables for) one or more tables")
     public static class Scrub extends NodeToolCmd
     {
-        @Arguments(usage = "[<keyspace> <cfnames>...]", description = "The keyspace followed by one or many column families")
+        @Arguments(usage = "[<keyspace> <tables>...]", description = "The keyspace followed by one or many tables")
         private List<String> args = new ArrayList<>();
 
         @Option(title = "disable_snapshot",
@@ -1039,10 +1042,10 @@ public class NodeTool
         }
     }
 
-    @Command(name = "disableautocompaction", description = "Disable autocompaction for the given keyspace and column family")
+    @Command(name = "disableautocompaction", description = "Disable autocompaction for the given keyspace and table")
     public static class DisableAutoCompaction extends NodeToolCmd
     {
-        @Arguments(usage = "[<keyspace> <cfnames>...]", description = "The keyspace followed by one or many column families")
+        @Arguments(usage = "[<keyspace> <tables>...]", description = "The keyspace followed by one or many tables")
         private List<String> args = new ArrayList<>();
 
         @Override
@@ -1064,10 +1067,10 @@ public class NodeTool
         }
     }
 
-    @Command(name = "enableautocompaction", description = "Enable autocompaction for the given keyspace and column family")
+    @Command(name = "enableautocompaction", description = "Enable autocompaction for the given keyspace and table")
     public static class EnableAutoCompaction extends NodeToolCmd
     {
-        @Arguments(usage = "[<keyspace> <cfnames>...]", description = "The keyspace followed by one or many column families")
+        @Arguments(usage = "[<keyspace> <tables>...]", description = "The keyspace followed by one or many tables")
         private List<String> args = new ArrayList<>();
 
         @Override
@@ -1089,10 +1092,10 @@ public class NodeTool
         }
     }
 
-    @Command(name = "upgradesstables", description = "Rewrite sstables (for the requested column families) that are not on the current version (thus upgrading them to said current version)")
+    @Command(name = "upgradesstables", description = "Rewrite sstables (for the requested tables) that are not on the current version (thus upgrading them to said current version)")
     public static class UpgradeSSTable extends NodeToolCmd
     {
-        @Arguments(usage = "[<keyspace> <cfnames>...]", description = "The keyspace followed by one or many column families")
+        @Arguments(usage = "[<keyspace> <tables>...]", description = "The keyspace followed by one or many tables")
         private List<String> args = new ArrayList<>();
 
         @Option(title = "include_all", name = {"-a", "--include-all-sstables"}, description = "Use -a to include all sstables, even those already on the current version")
@@ -1282,10 +1285,10 @@ public class NodeTool
         }
     }
 
-    @Command(name = "getcompactionthreshold", description = "Print min and max compaction thresholds for a given column family")
+    @Command(name = "getcompactionthreshold", description = "Print min and max compaction thresholds for a given table")
     public static class GetCompactionThreshold extends NodeToolCmd
     {
-        @Arguments(usage = "<keyspace> <cfname>", description = "The keyspace with a column family")
+        @Arguments(usage = "<keyspace> <table>", description = "The keyspace with a table")
         private List<String> args = new ArrayList<>();
 
         @Override
@@ -1325,7 +1328,7 @@ public class NodeTool
     @Command(name = "getendpoints", description = "Print the end points that owns the key")
     public static class GetEndpoints extends NodeToolCmd
     {
-        @Arguments(usage = "<keyspace> <cfname> <key>", description = "The keyspace, the column family, and the key for which we need to find the endpoint")
+        @Arguments(usage = "<keyspace> <table> <key>", description = "The keyspace, the table, and the key for which we need to find the endpoint")
         private List<String> args = new ArrayList<>();
 
         @Override
@@ -1347,7 +1350,7 @@ public class NodeTool
     @Command(name = "getsstables", description = "Print the sstable filenames that own the key")
     public static class GetSSTables extends NodeToolCmd
     {
-        @Arguments(usage = "<keyspace> <cfname> <key>", description = "The keyspace, the column family, and the key")
+        @Arguments(usage = "<keyspace> <table> <key>", description = "The keyspace, the table, and the key")
         private List<String> args = new ArrayList<>();
 
         @Override
@@ -1530,7 +1533,7 @@ public class NodeTool
     @Command(name = "refresh", description = "Load newly placed SSTables to the system without restart")
     public static class Refresh extends NodeToolCmd
     {
-        @Arguments(usage = "<keyspace> <cfname>", description = "The keyspace and column family name")
+        @Arguments(usage = "<keyspace> <table>", description = "The keyspace and table name")
         private List<String> args = new ArrayList<>();
 
         @Override
@@ -1577,10 +1580,10 @@ public class NodeTool
         }
     }
 
-    @Command(name = "repair", description = "Repair one or more column families")
+    @Command(name = "repair", description = "Repair one or more tables")
     public static class Repair extends NodeToolCmd
     {
-        @Arguments(usage = "[<keyspace> <cfnames>...]", description = "The keyspace followed by one or many column families")
+        @Arguments(usage = "[<keyspace> <tables>...]", description = "The keyspace followed by one or many tables")
         private List<String> args = new ArrayList<>();
 
         @Option(title = "seqential", name = {"-seq", "--sequential"}, description = "Use -seq to carry out a sequential repair")
@@ -1612,6 +1615,9 @@ public class NodeTool
         {
             List<String> keyspaces = parseOptionalKeyspace(args, probe);
             String[] cfnames = parseOptionalColumnFamilies(args);
+
+            if (primaryRange && (localDC || !specificHosts.isEmpty() || !specificHosts.isEmpty()))
+                throw new RuntimeException("Primary range repair should be performed on all nodes in the cluster.");
 
             for (String keyspace : keyspaces)
             {
@@ -1654,10 +1660,10 @@ public class NodeTool
         }
     }
 
-    @Command(name = "setcompactionthreshold", description = "Set min and max compaction thresholds for a given column family")
+    @Command(name = "setcompactionthreshold", description = "Set min and max compaction thresholds for a given table")
     public static class SetCompactionThreshold extends NodeToolCmd
     {
-        @Arguments(title = "<keyspace> <cfname> <minthreshold> <maxthreshold>", usage = "<keyspace> <cfname> <minthreshold> <maxthreshold>", description = "The keyspace, the column family, min and max threshold", required = true)
+        @Arguments(title = "<keyspace> <table> <minthreshold> <maxthreshold>", usage = "<keyspace> <table> <minthreshold> <maxthreshold>", description = "The keyspace, the table, min and max threshold", required = true)
         private List<String> args = new ArrayList<>();
 
         @Override
@@ -1715,13 +1721,13 @@ public class NodeTool
         }
     }
 
-    @Command(name = "snapshot", description = "Take a snapshot of specified keyspaces or a snapshot of the specified column family")
+    @Command(name = "snapshot", description = "Take a snapshot of specified keyspaces or a snapshot of the specified table")
     public static class Snapshot extends NodeToolCmd
     {
         @Arguments(usage = "[<keyspaces...>]", description = "List of keyspaces. By default, all keyspaces")
         private List<String> keyspaces = new ArrayList<>();
 
-        @Option(title = "cfname", name = {"-cf", "--column-family"}, description = "The column family name (you must specify one and only one keyspace for using this option)")
+        @Option(title = "table", name = {"-cf", "--column-family", "--table"}, description = "The table name (you must specify one and only one keyspace for using this option)")
         private String columnFamily = null;
 
         @Option(title = "tag", name = {"-t", "--tag"}, description = "The name of the snapshot")
@@ -1832,7 +1838,8 @@ public class NodeTool
             {
                 ownerships = probe.effectiveOwnership(keyspace);
                 hasEffectiveOwns = true;
-            } catch (IllegalStateException e)
+            }
+            catch (IllegalStateException e)
             {
                 ownerships = probe.getOwnership();
                 System.out.printf("Note: Ownership information does not include topology; for complete information, specify a keyspace%n");
@@ -1940,7 +1947,7 @@ public class NodeTool
                 buf.append(addressPlaceholder);               // address
                 buf.append("%-9s  ");                         // load
                 if (!isTokenPerNode)
-                    buf.append("%-6s  ");                     // "Tokens"
+                    buf.append("%-11s  ");                     // "Tokens"
                 if (hasEffectiveOwns)
                     buf.append("%-16s  ");                    // "Owns (effective)"
                 else
@@ -2135,10 +2142,10 @@ public class NodeTool
         }
     }
 
-    @Command(name = "rebuild_index", description = "A full rebuild of native secondary indexes for a given column family")
+    @Command(name = "rebuild_index", description = "A full rebuild of native secondary indexes for a given table")
     public static class RebuildIndex extends NodeToolCmd
     {
-        @Arguments(usage = "<keyspace> <cfname> <indexName...>", description = "The keyspace and column family name followed by a list of index names (IndexNameExample: Standard3.IdxName Standard3.IdxName1)")
+        @Arguments(usage = "<keyspace> <table> <indexName...>", description = "The keyspace and table name followed by a list of index names (IndexNameExample: Standard3.IdxName Standard3.IdxName1)")
         List<String> args = new ArrayList<>();
 
         @Override
@@ -2232,7 +2239,7 @@ public class NodeTool
         }
     }
 
-    @Command(name = "drain", description = "Drain the node (stop accepting writes and flush all column families)")
+    @Command(name = "drain", description = "Drain the node (stop accepting writes and flush all tables)")
     public static class Drain extends NodeToolCmd
     {
         @Override
@@ -2243,7 +2250,7 @@ public class NodeTool
                 probe.drain();
             } catch (IOException | InterruptedException | ExecutionException e)
             {
-                throw new RuntimeException("Error occured during flushing", e);
+                throw new RuntimeException("Error occurred during flushing", e);
             }
         }
     }
@@ -2293,10 +2300,10 @@ public class NodeTool
         }
     }
     
-    @Command(name = "setlogginglevel", description = "Set a log level for a given logger. If both classQualifer and level are empty/null, it will reset based on the initial configuration")
+    @Command(name = "setlogginglevel", description = "Set the log level threshold for a given class. If both class and level are empty/null, it will reset to the initial configuration")
     public static class SetLoggingLevel extends NodeToolCmd
     {
-        @Arguments(usage = "<classQualifer> <level>", description = "The logger classQualifer and the logger level (can be empty)")
+        @Arguments(usage = "<class> <level>", description = "The class to change the level for and the log level threshold to set (can be empty)")
         private List<String> args = new ArrayList<>();
 
         @Override

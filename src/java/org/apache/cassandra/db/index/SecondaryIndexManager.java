@@ -213,24 +213,18 @@ public class SecondaryIndexManager
     }
 
     /**
-     * @return true if the indexes can handle the clause.
+     * @return true if at least one of the indexes can handle the clause.
      */
     public boolean hasIndexFor(List<IndexExpression> clause)
     {
         if (clause == null || clause.isEmpty())
             return false;
 
-        // It doesn't seem a clause can have multiple searchers, but since
-        // getIndexSearchersForQuery returns a list ...
-        List<SecondaryIndexSearcher> searchers = getIndexSearchersForQuery(clause);
-        if (searchers.isEmpty())
-            return false;
+        for (SecondaryIndexSearcher searcher : getIndexSearchersForQuery(clause))
+            if (searcher.canHandleIndexClause(clause))
+                return true;
 
-        for (SecondaryIndexSearcher searcher : searchers)
-            if (!searcher.isIndexing(clause))
-                return false;
-
-        return true;
+        return false;
     }
 
     /**
@@ -570,7 +564,6 @@ public class SecondaryIndexManager
 
     /**
      * Performs a search across a number of column indexes
-     * TODO: add support for querying across index types
      *
      * @param filter the column range to restrict to
      * @return found indexed rows
@@ -582,11 +575,20 @@ public class SecondaryIndexManager
         if (indexSearchers.isEmpty())
             return Collections.emptyList();
 
-        //We currently don't support searching across multiple index types
-        if (indexSearchers.size() > 1)
-            throw new RuntimeException("Unable to search across multiple secondary index types");
+        SecondaryIndexSearcher mostSelective = null;
+        long bestEstimate = Long.MAX_VALUE;
+        for (SecondaryIndexSearcher searcher : indexSearchers)
+        {
+            SecondaryIndex highestSelectivityIndex = searcher.highestSelectivityIndex(filter.getClause());
+            long estimate = highestSelectivityIndex.estimateResultRows();
+            if (estimate <= bestEstimate)
+            {
+                bestEstimate = estimate;
+                mostSelective = searcher;
+            }
+        }
 
-        return indexSearchers.get(0).search(filter);
+        return mostSelective.search(filter);
     }
 
     public Set<SecondaryIndex> getIndexesByNames(Set<String> idxNames)
@@ -618,6 +620,22 @@ public class SecondaryIndexManager
                 return false;
         }
         return true;
+    }
+
+    static boolean shouldCleanupOldValue(Cell oldCell, Cell newCell)
+    {
+        // If any one of name/value/timestamp are different, then we
+        // should delete from the index. If not, then we can infer that
+        // at least one of the cells is an ExpiringColumn and that the
+        // difference is in the expiry time. In this case, we don't want to
+        // delete the old value from the index as the tombstone we insert
+        // will just hide the inserted value.
+        // Completely identical cells (including expiring columns with
+        // identical ttl & localExpirationTime) will not get this far due
+        // to the oldCell.equals(newColumn) in StandardUpdater.update
+        return !oldCell.name().equals(newCell.name())
+            || !oldCell.value().equals(newCell.value())
+            || oldCell.timestamp() != newCell.timestamp();
     }
 
     public static interface Updater
@@ -711,9 +729,19 @@ public class SecondaryIndexManager
                 if (index instanceof PerColumnSecondaryIndex)
                 {
                     if (cell.isLive())
+                    {
                         ((PerColumnSecondaryIndex) index).update(key.getKey(), oldCell, cell, opGroup);
+                    }
                     else
-                        ((PerColumnSecondaryIndex) index).delete(key.getKey(), oldCell, opGroup);
+                    {
+                        // Usually we want to delete the old value from the index, except when
+                        // name/value/timestamp are all equal, but the columns themselves
+                        // are not (as is the case when overwriting expiring columns with
+                        // identical values and ttl) Then, we don't want to delete as the
+                        // tombstone will hide the new value we just inserted; see CASSANDRA-7268
+                        if (shouldCleanupOldValue(oldCell, cell))
+                            ((PerColumnSecondaryIndex) index).delete(key.getKey(), oldCell, opGroup);
+                    }
                 }
             }
         }
@@ -733,5 +761,6 @@ public class SecondaryIndexManager
             for (SecondaryIndex index : rowLevelIndexMap.values())
                 ((PerRowSecondaryIndex) index).index(key.getKey(), cf);
         }
+
     }
 }
